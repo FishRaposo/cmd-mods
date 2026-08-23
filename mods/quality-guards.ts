@@ -480,9 +480,12 @@ export default function (cmd: ModApi): void {
     },
   });
 
-  // ── Hooks: drift + test budget + token budget + run-length ───────────────
-  cmd.hooks({
-    appendSystemPrompt: () => {
+  // ── Warnings: drift + test budget + token budget + run-length ────────────
+  // Tail-injected via transformContext, NOT appendSystemPrompt: the system
+  // prompt must stay byte-identical across turns so the provider's prompt
+  // cache keeps its prefix hits. Warning text changes at threshold
+  // crossings; living on the message tail confines the churn to the tail.
+  function buildWarnings(): string[] {
       const prompts: string[] = [];
 
       if (driftEnabled() && currentTaskLabel && turnsSinceSummary >= driftTurns()) {
@@ -528,7 +531,17 @@ export default function (cmd: ModApi): void {
         }
       }
 
-      return prompts.length > 0 ? prompts.join('\n') : undefined;
+      return prompts;
+  }
+
+  cmd.hooks({
+    transformContext: ({messages}) => {
+      const prompts = buildWarnings();
+      if (prompts.length === 0) return messages;
+      return [...messages, {
+        role: 'user',
+        content: `[quality-guards] Advisory:\n${prompts.join('\n')}`,
+      } as never];
     },
   });
 
