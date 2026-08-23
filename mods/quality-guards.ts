@@ -1,5 +1,6 @@
 import type {ModApi} from '@commandcode/harness';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 // ── Quality Guards — nudge the agent away from dumb mistakes ─────────────────
@@ -111,7 +112,7 @@ function extractOldString(input: unknown): string | null {
 
 function normalizeFilePath(filePath: string, cwd: string): string {
   const expanded = filePath.startsWith('~/')
-    ? path.join(process.env.HOME || process.env.USERPROFILE || '', filePath.slice(2))
+    ? path.join(os.homedir(), filePath.slice(2))
     : filePath;
   return path.normalize(path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded)).toLowerCase();
 }
@@ -254,10 +255,11 @@ export default function (cmd: ModApi): void {
     if (typeof v === 'string') return v !== 'false';
     return fallback;
   }
-  function numFlag(name: string, fallback: number): number {
+  function numFlag(name: string, fallback: number, min: number = 0): number {
     const v = cmd.getFlag(name);
     const n = typeof v === 'number' ? v : parseInt(String(v), 10);
-    return Number.isFinite(n) ? n : fallback;
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return n;
   }
   function failureCoachingEnabled(): boolean { return boolFlag('qg-failure-coaching', true); }
   function loopDetectionEnabled(): boolean { return boolFlag('qg-loop-detection', true); }
@@ -269,11 +271,11 @@ export default function (cmd: ModApi): void {
   function tokenBudgetEnabled(): boolean { return boolFlag('qg-token-budget', true); }
   function driftEnabled(): boolean { return boolFlag('qg-drift', true); }
   function runLengthEnabled(): boolean { return boolFlag('qg-run-length', true); }
-  function maxFailures(): number { return numFlag('qg-max-failures', 3); }
-  function loopThreshold(): number { return numFlag('qg-loop-threshold', 3); }
-  function budgetTurns(): number { return numFlag('qg-budget-turns', 12); }
-  function tokenWarnTurns(): number { return numFlag('qg-token-warn-turns', 20); }
-  function driftTurns(): number { return numFlag('qg-drift-turns', 8); }
+  function maxFailures(): number { return numFlag('qg-max-failures', 3, 1); }
+  function loopThreshold(): number { return numFlag('qg-loop-threshold', 3, 1); }
+  function budgetTurns(): number { return numFlag('qg-budget-turns', 12, 1); }
+  function tokenWarnTurns(): number { return numFlag('qg-token-warn-turns', 20, 1); }
+  function driftTurns(): number { return numFlag('qg-drift-turns', 8, 1); }
 
   // ── State ────────────────────────────────────────────────────────────────
   let consecutiveFailures = 0;
@@ -305,6 +307,9 @@ export default function (cmd: ModApi): void {
   let topicTurns = 0;
   let turnsSinceSummary = 0;
   let taskDurations: Record<string, number> = {};
+  // Task label the run-length warning last fired for — the warning must fire
+  // at most once per task, not re-inject on every remaining turn.
+  let runLengthWarnedFor: string | null = null;
 
   // Loose read-only dependency on session-persistence's checkpoint: past task
   // durations live there. If the mod isn't installed, run-length stays inert.
@@ -501,7 +506,7 @@ export default function (cmd: ModApi): void {
       }
 
       // Run-length estimation: warn if current task is taking longer than similar past tasks
-      if (runLengthEnabled() && currentTaskLabel) {
+      if (runLengthEnabled() && currentTaskLabel && runLengthWarnedFor !== currentTaskLabel) {
         if (Object.keys(taskDurations).length === 0) {
           taskDurations = loadPastDurations();
         }
@@ -515,6 +520,7 @@ export default function (cmd: ModApi): void {
                   `You're at ${currentTurns} turns on "${currentTaskLabel}". ` +
                   'You may be over-engineering or stuck. Consider wrapping up and moving on.',
                 );
+                runLengthWarnedFor = currentTaskLabel; // Once per task
               }
               break; // Only report the first close match
             }
