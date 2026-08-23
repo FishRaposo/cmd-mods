@@ -84,6 +84,25 @@ Learn-loop **only manages skills it installed itself**: every install writes
 archive, delete) verifies that marker first. User-installed skills are
 visible in `/learn status` but never modified, merged into, or deleted.
 
+## Measured prompt-cache performance
+
+The `cache-tracker` mod measures the suite's own cache hit rate
+(`cacheRead / (input + cacheRead + cacheWrite)` — the provider's disjoint
+token buckets). Real numbers from the repo's own sessions on DeepSeek V4
+(flash and pro):
+
+| Session | Requests | Input | Cache read | Hit rate |
+|---|---|---|---|---|
+| Interactive review (25 turns) | 25 | 6,649,218 | 6,317,312 | **48.7%** |
+| One-shot headless runs (median) | 1 | ~21.4K | ~5.4K | 10.7–29.8% |
+
+Why the numbers look like this: one-shot headless runs are a cold-start
+worst case — the system prompt must be re-processed once per run. The
+interactive session shows the cache discipline paying off across turns:
+the stable system prompt prefix stays cached turn after turn, so ~49% of
+input tokens were cache reads. The hit rate is provider- and session-
+dependent; `/cache` shows your own live numbers.
+
 ## Install a single mod
 
 Install the suite, then keep only the mods you want via the object form of
