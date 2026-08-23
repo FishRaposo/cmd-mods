@@ -674,7 +674,10 @@ export default function (cmd: ModApi): void {
       if (!block) return messages;
 
       const recallMsg = {role: 'user', content: block};
-      const insertIdx = Math.max(0, messages.length - 2);
+      // Insert directly before the final user message (cache-optimal tail
+      // position): only the last array entry falls outside the cached
+      // prefix, instead of the last two from a length-2 splice.
+      const insertIdx = Math.max(0, messages.length - 1);
       const result = [...messages];
       result.splice(insertIdx, 0, recallMsg as never);
       return result;

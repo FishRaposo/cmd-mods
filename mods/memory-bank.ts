@@ -600,7 +600,10 @@ export default function (cmd: ModApi): void {
         .concat(hits.map(h => `- ${h.layer}: ${h.title} — ${h.detail.slice(0, 160)}`))
         .join('\n');
       const result = [...messages];
-      result.splice(Math.max(0, result.length - 2), 0, {role: 'user', content: block} as never);
+      // Insert directly before the final user message (cache-optimal tail
+      // position): only the last array entry falls outside the cached
+      // prefix, instead of the last two from a length-2 splice.
+      result.splice(Math.max(0, result.length - 1), 0, {role: 'user', content: block} as never);
       return result;
     },
   });
