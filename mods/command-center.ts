@@ -98,18 +98,26 @@ export default function (cmd: ModApi): void {
 
   // addFlag supports only 'boolean' | 'string' — a --mod-option value for a
   // numeric flag arrives as a string, so parse it here.
-  function numFlag(name: string, fallback: number): number {
+  function numFlag(name: string, fallback: number, min: number = 0): number {
     const v = cmd.getFlag(name);
     const n = typeof v === 'number' ? v : parseInt(String(v), 10);
-    return Number.isFinite(n) ? n : fallback;
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return n;
+  }
+
+  function boolFlag(name: string, fallback: boolean): boolean {
+    const v = cmd.getFlag(name);
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') return v !== 'false';
+    return fallback;
   }
 
   function maxRounds(): number {
-    return numFlag('cc-max-rounds', 3);
+    return numFlag('cc-max-rounds', 3, 1);
   }
 
   function verbose(): boolean {
-    return (cmd.getFlag('cc-verbose') as boolean) || false;
+    return boolFlag('cc-verbose', false);
   }
 
   function notify(message: string): void {
