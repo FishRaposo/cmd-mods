@@ -213,10 +213,11 @@ export default function (cmd: ModApi): void {
   cmd.addFlag('mb-auto-graduate', {type: 'boolean', default: true,
     description: 'Automatically hand stable lessons to learn-loop as skills once they cross mb-graduate-after'});
 
-  function numFlag(name: string, fallback: number): number {
+  function numFlag(name: string, fallback: number, min: number = 0): number {
     const v = cmd.getFlag(name);
     const n = typeof v === 'number' ? v : parseFloat(String(v));
-    return Number.isFinite(n) ? n : fallback;
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return n;
   }
 
   function boolFlag(name: string, fallback: boolean): boolean {
@@ -245,7 +246,7 @@ export default function (cmd: ModApi): void {
     }
     if (!fs.existsSync(l1Path)) fs.writeFileSync(l1Path, L1_TEMPLATE);
     if (!fs.existsSync(l1ArchivePath)) {
-      fs.writeFileSync(l1ArchivePath, '# L1 — Archive\n\n<!-- Verbatum compactions from L1-EVENTS.md, oldest first -->\n');
+      fs.writeFileSync(l1ArchivePath, '# L1 — Archive\n\n<!-- Verbatim compactions from L1-EVENTS.md, oldest first -->\n');
     }
     if (!fs.existsSync(l2Path)) fs.writeFileSync(l2Path, L2_TEMPLATE);
     if (!fs.existsSync(ledgerPath)) fs.writeFileSync(ledgerPath, '');
@@ -463,10 +464,14 @@ export default function (cmd: ModApi): void {
 
   function graduateLessonToLearnLoop(lesson: LessonMeta): void {
     if (graduated.has(lesson.file)) return;
+    let what = '';
+    let why = '';
+    try {
+      const raw = stripBom(fs.readFileSync(path.join(l3Dir, lesson.file), 'utf-8'));
+      what = raw.match(/## What\n([\s\S]*?)(?=\n## Why|\n---|$)/)?.[1]?.trim() ?? '';
+      why = raw.match(/## Why\n([\s\S]*?)(?=$)/)?.[1]?.trim() ?? '';
+    } catch { /* lesson vanished — nothing to hand over */ return; }
     graduated.add(lesson.file);
-    const raw = fs.readFileSync(path.join(l3Dir, lesson.file), 'utf-8');
-    const what = raw.match(/## What\n([\s\S]*?)(?=\n## Why|\n---|$)/)?.[1]?.trim() ?? '';
-    const why = raw.match(/## Why\n([\s\S]*?)(?=$)/)?.[1]?.trim() ?? '';
     cmd.events.emit('memory-bank/graduate', {
       title: lesson.title,
       domain: lesson.domain,
@@ -480,7 +485,7 @@ export default function (cmd: ModApi): void {
 
   function maybeAutoGraduate(): void {
     if (!boolFlag('mb-auto-graduate', true)) return;
-    const threshold = numFlag('mb-graduate-after', 3);
+    const threshold = numFlag('mb-graduate-after', 3, 1);
     const stats = loadRecallStats();
     const alreadyGraduated = new Set(stats.graduated);
     for (const lesson of listLessons()) {
@@ -562,7 +567,7 @@ export default function (cmd: ModApi): void {
       digestInjected = true;
       if (!fs.existsSync(l1Path)) return undefined;
       const lines: string[] = [];
-      const entries = readL1Entries().slice(0, numFlag('mb-digest-lines', 3));
+      const entries = readL1Entries().slice(0, numFlag('mb-digest-lines', 3, 0));
       if (entries.length > 0) {
         lines.push('PROJECT MEMORY (leads, not facts — verify before acting):');
         for (const e of entries) lines.push(`  ${e.title}`);
@@ -589,7 +594,7 @@ export default function (cmd: ModApi): void {
         }
       }
       if (lastUser.length < 8) return messages;
-      const hits = recall(lastUser, Math.round(numFlag('mb-max-recall-items', 3)));
+      const hits = recall(lastUser, Math.round(numFlag('mb-max-recall-items', 3, 0)));
       if (hits.length === 0) return messages;
       const block = ['\n[memory] Prior durable facts (leads — verify before acting):']
         .concat(hits.map(h => `- ${h.layer}: ${h.title} — ${h.detail.slice(0, 160)}`))
