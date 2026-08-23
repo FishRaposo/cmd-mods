@@ -154,7 +154,14 @@ function extractTaskLabel(text: string): string | null {
   const match = text.match(
     /\b(implement|build|migrat|refactor|fix|add|configure|wire|deploy|setup|create|update|remove|rewrite|upgrade)\w*\s+([\w\s\-/.()]{3,80}?)[\.\n]/i,
   );
-  return match ? match[0].trim() : null;
+  if (!match) return null;
+  const label = match[0].trim();
+  // Document phrases like "updated in the same commit." read as task verbs
+  // but describe the artifact, not the task.
+  if (/\b(same commit|this commit|this file|the changelog|the readme|the repo|this branch|this session)\b/i.test(label)) {
+    return null;
+  }
+  return label;
 }
 
 // ── Mod ─────────────────────────────────────────────────────────────────────

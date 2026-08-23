@@ -848,43 +848,46 @@ export default function (cmd: ModApi): void {
           const kind: Artifact['kind'] =
             workflowWords.test(joined) && !styleWords.test(joined) ? 'skill' : 'taste';
           const candidateId = `${kind}-${sig}`;
-          const idx = loadIndex();
+          // Locked: candidate dir write + index insert is read-modify-write.
+          withLock('index', () => {
+            const idx = loadIndex();
 
-          if (!idx.artifacts[candidateId]) {
-            const content = kind === 'skill'
-              ? `# ${sig || 'Learned workflow'} (auto-drafted)\n\n## When to use\n${episode.user_corrections[episode.user_corrections.length - 1].slice(0, 200)}\n\n## Steps\n${joined}\n`
-              : '# Taste rule (auto-drafted)\n\n' + joined + '\n';
-            const art: Artifact = {
-              kind,
-              status: 'shadow',
-              path: `candidates/${candidateId}`,
-              scope: 'user',
-              tags: extractKeywords(episode.task_signature),
-              description: `User correction pattern: ${episode.user_corrections[episode.user_corrections.length - 1].slice(0, 80)}`,
-              confidence: 0.1,
-              shadow_runs: 1,
-              green: 1,
-              red: 0,
-              rejections: 0,
-              episodes: [],
-              created: new Date().toISOString(),
-              last_verified: '',
-              last_used: '',
-              pinned: false,
-            };
-            ensureDir(path.join(CANDIDATES_DIR, candidateId));
-            fs.writeFileSync(path.join(CANDIDATES_DIR, candidateId, kind === 'skill' ? 'skill.md' : 'taste.md'), content);
-            idx.artifacts[candidateId] = art;
-            saveIndex(idx);
-            cmd.ui.setStatus(buildStatus());
-            writeReceipt({
-              action: 'seed',
-              id: candidateId,
-              kind,
-              reason: '3+ user corrections in session',
-              evidence: {corrections: episode.user_corrections.length},
-            });
-          }
+            if (!idx.artifacts[candidateId]) {
+              const content = kind === 'skill'
+                ? `# ${sig || 'Learned workflow'} (auto-drafted)\n\n## When to use\n${episode?.user_corrections[episode?.user_corrections.length - 1]?.slice(0, 200) ?? ''}\n\n## Steps\n${joined}\n`
+                : '# Taste rule (auto-drafted)\n\n' + joined + '\n';
+              const art: Artifact = {
+                kind,
+                status: 'shadow',
+                path: `candidates/${candidateId}`,
+                scope: 'user',
+                tags: extractKeywords(episode.task_signature),
+                description: `User correction pattern: ${episode.user_corrections[episode.user_corrections.length - 1].slice(0, 80)}`,
+                confidence: 0.1,
+                shadow_runs: 1,
+                green: 1,
+                red: 0,
+                rejections: 0,
+                episodes: [],
+                created: new Date().toISOString(),
+                last_verified: '',
+                last_used: '',
+                pinned: false,
+              };
+              ensureDir(path.join(CANDIDATES_DIR, candidateId));
+              fs.writeFileSync(path.join(CANDIDATES_DIR, candidateId, kind === 'skill' ? 'skill.md' : 'taste.md'), content);
+              idx.artifacts[candidateId] = art;
+              saveIndex(idx);
+              cmd.ui.setStatus(buildStatus());
+              writeReceipt({
+                action: 'seed',
+                id: candidateId,
+                kind,
+                reason: '3+ user corrections in session',
+                evidence: {corrections: episode.user_corrections.length},
+              });
+            }
+          });
           cmd.ui.notify(
             `I've noticed you correct this pattern often. Drafting a ${kind} ` +
             `candidate (shadowed): ${candidateId}.`,
@@ -1482,89 +1485,93 @@ export default function (cmd: ModApi): void {
     ].join('\n');
 
     // Prefer patching an existing artifact; otherwise create a fresh candidate.
-    const idx = loadIndex();
-    let art = idx.artifacts[skillName];
-    if (art) {
-      if (art.kind !== 'skill') {
-        art = undefined;
-      } else {
-        const file = resolveArtifactFile(art);
-        if (!file) return;
-        fs.writeFileSync(file, body);
-        art.description = title.slice(0, 60);
-        art.tags = [...new Set([...(art.tags || []), domain, ...extractKeywords(title)])];
-        art.last_verified = new Date().toISOString();
-        art.version = (art.version ?? 0) + 1;
-        art.confidence = Math.max(art.confidence, 0.3);
-        saveIndex(idx);
-        if (art.status === 'active') syncInstalledSkill(art);
-        else {
-          // Memory graduation is verified evidence — promote straight through.
-          art.status = 'active';
-          const oldPath = art.path;
-          const newRel = path.join('active', 'skill', skillName).split(path.sep).join('/');
-          if (oldPath !== newRel) {
-            moveDir(path.join(LEARNING_DIR, oldPath), path.join(LEARNING_DIR, newRel));
-          }
-          art.path = newRel;
+    // Locked: the whole graduate path (index update + skill-dir move + live
+    // sync) is one read-modify-write on shared state.
+    withLock('index', () => {
+      const idx = loadIndex();
+      let art = idx.artifacts[skillName];
+      if (art) {
+        if (art.kind !== 'skill') {
+          art = undefined;
+        } else {
+          const file = resolveArtifactFile(art);
+          if (!file) return;
+          fs.writeFileSync(file, body);
+          art.description = title.slice(0, 60);
+          art.tags = [...new Set([...(art.tags || []), domain, ...extractKeywords(title)])];
+          art.last_verified = new Date().toISOString();
+          art.version = (art.version ?? 0) + 1;
+          art.confidence = Math.max(art.confidence, 0.3);
           saveIndex(idx);
-          syncInstalledSkill(art);
+          if (art.status === 'active') syncInstalledSkill(art);
+          else {
+            // Memory graduation is verified evidence — promote straight through.
+            art.status = 'active';
+            const oldPath = art.path;
+            const newRel = path.join('active', 'skill', skillName).split(path.sep).join('/');
+            if (oldPath !== newRel) {
+              moveDir(path.join(LEARNING_DIR, oldPath), path.join(LEARNING_DIR, newRel));
+            }
+            art.path = newRel;
+            saveIndex(idx);
+            syncInstalledSkill(art);
+          }
+          cmd.ui.setStatus(buildStatus());
+          writeReceipt({
+            action: 'memory-graduate-update',
+            id: skillName,
+            domain,
+            source,
+          });
+          return;
         }
-        cmd.ui.setStatus(buildStatus());
-        writeReceipt({
-          action: 'memory-graduate-update',
-          id: skillName,
-          domain,
-          source,
-        });
-        return;
       }
-    }
 
-    const safeName = slugify(skillName) || 'memory-skill';
-    if (idx.artifacts[safeName]) {
-      // Another artifact occupies the canonical name — re-point at it.
-      art = idx.artifacts[safeName];
-    }
-    if (!art) {
-      art = {
-        kind: 'skill',
-        status: 'active', // memory graduation already passed the write-bar
-        path: `active/skill/${safeName}`,
-        scope: 'project',
-        tags: [domain, ...extractKeywords(title)],
-        description: title.slice(0, 60),
-        confidence: 0.5,
-        shadow_runs: 0,
-        green: 0,
-        red: 0,
-        rejections: 0,
-        episodes: [],
-        created: new Date().toISOString(),
-        last_verified: new Date().toISOString(),
-        last_used: '',
-        pinned: false,
-        version: 1,
-        use_count: 0,
-      };
-      const artDir = path.join(LEARNING_DIR, art.path);
-      ensureDir(artDir);
-      fs.writeFileSync(path.join(artDir, 'skill.md'), body);
-      idx.artifacts[safeName] = art;
-    }
-    saveIndex(idx);
-    const syncErr = syncInstalledSkill(art);
-    cmd.ui.setStatus(buildStatus());
-    writeReceipt({
-      action: 'memory-graduate',
-      id: safeName,
-      domain,
-      source,
-      skillErr: syncErr ?? null,
+      const safeName = slugify(skillName) || 'memory-skill';
+      if (idx.artifacts[safeName]) {
+        // Another artifact occupies the canonical name — re-point at it.
+        art = idx.artifacts[safeName];
+      }
+      if (!art) {
+        art = {
+          kind: 'skill',
+          status: 'active', // memory graduation already passed the write-bar
+          path: `active/skill/${safeName}`,
+          scope: 'project',
+          tags: [domain, ...extractKeywords(title)],
+          description: title.slice(0, 60),
+          confidence: 0.5,
+          shadow_runs: 0,
+          green: 0,
+          red: 0,
+          rejections: 0,
+          episodes: [],
+          created: new Date().toISOString(),
+          last_verified: new Date().toISOString(),
+          last_used: '',
+          pinned: false,
+          version: 1,
+          use_count: 0,
+        };
+        const artDir = path.join(LEARNING_DIR, art.path);
+        ensureDir(artDir);
+        fs.writeFileSync(path.join(artDir, 'skill.md'), body);
+        idx.artifacts[safeName] = art;
+      }
+      saveIndex(idx);
+      const syncErr = syncInstalledSkill(art);
+      cmd.ui.setStatus(buildStatus());
+      writeReceipt({
+        action: 'memory-graduate',
+        id: safeName,
+        domain,
+        source,
+        skillErr: syncErr ?? null,
+      });
+      if (syncErr) {
+        cmd.ui.notify(`learn-loop: memory graduation for "${safeName}" could not be installed: ${syncErr}`);
+      }
     });
-    if (syncErr) {
-      cmd.ui.notify(`learn-loop: memory graduation for "${safeName}" could not be installed: ${syncErr}`);
-    }
   });
 
   // ── Hooks: onSessionStart / onSessionEnd ────────────────────────────────
@@ -1815,12 +1822,15 @@ export default function (cmd: ModApi): void {
     handler: ({args}) => {
       const id = args.trim();
       if (!id) return {message: 'Usage: /pin <artifact-id>'};
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Artifact "${id}" not found.`};
-      art.pinned = true;
-      saveIndex(idx);
-      return {message: `Pinned "${id}". Protected from auto-decay.`};
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Artifact "${id}" not found.`};
+        art.pinned = true;
+        saveIndex(idx);
+        return {message: `Pinned "${id}". Protected from auto-decay.`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -1831,12 +1841,15 @@ export default function (cmd: ModApi): void {
     handler: ({args}) => {
       const id = args.trim();
       if (!id) return {message: 'Usage: /unpin <artifact-id>'};
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Artifact "${id}" not found.`};
-      art.pinned = false;
-      saveIndex(idx);
-      return {message: `Unpinned "${id}".`};
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Artifact "${id}" not found.`};
+        art.pinned = false;
+        saveIndex(idx);
+        return {message: `Unpinned "${id}".`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -1872,16 +1885,19 @@ export default function (cmd: ModApi): void {
     handler: ({args}) => {
       const id = args.trim();
       if (!id) return {message: 'Usage: /shadow <candidate-id>'};
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Candidate "${id}" not found.`};
-      if (art.status !== 'candidate') {
-        return {message: `"${id}" is ${art.status}, not a candidate.`};
-      }
-      art.status = 'shadow';
-      art.shadow_runs = 0;
-      saveIndex(idx);
-      return {message: `"${id}" is now shadowing. It will influence context and track results.`};
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Candidate "${id}" not found.`};
+        if (art.status !== 'candidate') {
+          return {message: `"${id}" is ${art.status}, not a candidate.`};
+        }
+        art.status = 'shadow';
+        art.shadow_runs = 0;
+        saveIndex(idx);
+        return {message: `"${id}" is now shadowing. It will influence context and track results.`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -2024,30 +2040,33 @@ export default function (cmd: ModApi): void {
       if (!parts) return {message: 'Usage: /reject <id> --reason "explanation"'};
       const [, id, reason] = parts;
 
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Candidate "${id}" not found.`};
-      art.status = 'rejected';
-      art.rejection_reason = reason;
-      art.rejections += 1;
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Candidate "${id}" not found.`};
+        art.status = 'rejected';
+        art.rejection_reason = reason;
+        art.rejections += 1;
 
-      // A rejected skill leaves .agents/skills/ — it is no longer live.
-      // (Refusal for a foreign dir leaves the status recorded but the live
-      // install untouched, which is exactly the ownership boundary.)
-      let liveErr: string | null = null;
-      if (art.kind === 'skill') liveErr = removeSkillFile(id);
+        // A rejected skill leaves .agents/skills/ — it is no longer live.
+        // (Refusal for a foreign dir leaves the status recorded but the live
+        // install untouched, which is exactly the ownership boundary.)
+        let liveErr: string | null = null;
+        if (art.kind === 'skill') liveErr = removeSkillFile(id);
 
-      // Move to graveyard under a timestamped version dir
-      if (art.path.startsWith('candidates/')) {
-        const graveRel = path.join('graveyard', id, Date.now().toString(36))
-          .split(path.sep).join('/');
-        moveDir(path.join(LEARNING_DIR, art.path), path.join(LEARNING_DIR, graveRel));
-        art.path = graveRel;
-      }
+        // Move to graveyard under a timestamped version dir
+        if (art.path.startsWith('candidates/')) {
+          const graveRel = path.join('graveyard', id, Date.now().toString(36))
+            .split(path.sep).join('/');
+          moveDir(path.join(LEARNING_DIR, art.path), path.join(LEARNING_DIR, graveRel));
+          art.path = graveRel;
+        }
 
-      saveIndex(idx);
-      cmd.ui.setStatus(buildStatus());
-      return {message: `Rejected "${id}": ${reason}${liveErr ? `\n⚠ could not remove live skill: ${liveErr}` : ''}`};
+        saveIndex(idx);
+        cmd.ui.setStatus(buildStatus());
+        return {message: `Rejected "${id}": ${reason}${liveErr ? `\n⚠ could not remove live skill: ${liveErr}` : ''}`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -2060,30 +2079,33 @@ export default function (cmd: ModApi): void {
       if (!parts) return {message: 'Usage: /demote <id> --reason "explanation"'};
       const [, id, reason] = parts;
 
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Artifact "${id}" not found.`};
-      if (art.status !== 'active') {
-        return {message: `"${id}" is ${art.status}. Demote only from active.`};
-      }
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Artifact "${id}" not found.`};
+        if (art.status !== 'active') {
+          return {message: `"${id}" is ${art.status}. Demote only from active.`};
+        }
 
-      art.status = 'shadow';
-      art.rejection_reason = reason;
-      art.shadow_runs = 0;
+        art.status = 'shadow';
+        art.rejection_reason = reason;
+        art.shadow_runs = 0;
 
-      // A demoted skill leaves .agents/skills/ — it is no longer live.
-      if (art.kind === 'skill') removeSkillFile(id);
+        // A demoted skill leaves .agents/skills/ — it is no longer live.
+        if (art.kind === 'skill') removeSkillFile(id);
 
-      // Move back to candidates so promote can pick it up again
-      if (art.path.startsWith('active/')) {
-        const newRel = path.join('candidates', id).split(path.sep).join('/');
-        moveDir(path.join(LEARNING_DIR, art.path), path.join(LEARNING_DIR, newRel));
-        art.path = newRel;
-      }
+        // Move back to candidates so promote can pick it up again
+        if (art.path.startsWith('active/')) {
+          const newRel = path.join('candidates', id).split(path.sep).join('/');
+          moveDir(path.join(LEARNING_DIR, art.path), path.join(LEARNING_DIR, newRel));
+          art.path = newRel;
+        }
 
-      saveIndex(idx);
-      cmd.ui.setStatus(buildStatus());
-      return {message: `Demoted "${id}" → shadow: ${reason}${art.kind === 'skill' ? '\n→ live skill removed from .agents/skills/' : ''}`};
+        saveIndex(idx);
+        cmd.ui.setStatus(buildStatus());
+        return {message: `Demoted "${id}" → shadow: ${reason}${art.kind === 'skill' ? '\n→ live skill removed from .agents/skills/' : ''}`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -2124,43 +2146,46 @@ export default function (cmd: ModApi): void {
     handler: ({args}) => {
       const id = args.trim();
       if (!id) return {message: 'Usage: /rollback <id>'};
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Artifact "${id}" not found.`};
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Artifact "${id}" not found.`};
 
-      // Check graveyard for a previous version
-      const graveRoot = path.join(GRAVEYARD_DIR, id);
-      if (!fs.existsSync(graveRoot)) {
-        return {message: `No previous version found for "${id}" in graveyard.`};
-      }
-      let versions: string[] = [];
-      try {
-        versions = fs.readdirSync(graveRoot)
-          .filter(f => fs.statSync(path.join(graveRoot, f)).isDirectory())
-          .sort();
-      } catch { /* ok */ }
-      if (versions.length === 0) {
-        return {message: `No previous version found for "${id}" in graveyard.`};
-      }
-      const latest = versions[versions.length - 1];
+        // Check graveyard for a previous version
+        const graveRoot = path.join(GRAVEYARD_DIR, id);
+        if (!fs.existsSync(graveRoot)) {
+          return {message: `No previous version found for "${id}" in graveyard.`};
+        }
+        let versions: string[] = [];
+        try {
+          versions = fs.readdirSync(graveRoot)
+            .filter(f => fs.statSync(path.join(graveRoot, f)).isDirectory())
+            .sort();
+        } catch { /* ok */ }
+        if (versions.length === 0) {
+          return {message: `No previous version found for "${id}" in graveyard.`};
+        }
+        const latest = versions[versions.length - 1];
 
-      const newRel = path.join('candidates', id).split(path.sep).join('/');
-      moveDir(path.join(graveRoot, latest), path.join(LEARNING_DIR, newRel));
-      try {
-        if (fs.readdirSync(graveRoot).length === 0) fs.rmdirSync(graveRoot);
-      } catch { /* ok */ }
+        const newRel = path.join('candidates', id).split(path.sep).join('/');
+        moveDir(path.join(graveRoot, latest), path.join(LEARNING_DIR, newRel));
+        try {
+          if (fs.readdirSync(graveRoot).length === 0) fs.rmdirSync(graveRoot);
+        } catch { /* ok */ }
 
-      // The rolled-back artifact is a candidate again — a live skill install
-      // from its previous life must go.
-      let liveErr: string | null = null;
-      if (art.kind === 'skill') liveErr = removeSkillFile(id);
+        // The rolled-back artifact is a candidate again — a live skill install
+        // from its previous life must go.
+        let liveErr: string | null = null;
+        if (art.kind === 'skill') liveErr = removeSkillFile(id);
 
-      art.path = newRel;
-      art.status = 'candidate';
-      art.rejection_reason = undefined;
-      saveIndex(idx);
-      cmd.ui.setStatus(buildStatus());
-      return {message: `Rolled back "${id}" to the version archived at ${latest}. Status: candidate.${liveErr ? `\n⚠ could not remove live skill: ${liveErr}` : ''}`};
+        art.path = newRel;
+        art.status = 'candidate';
+        art.rejection_reason = undefined;
+        saveIndex(idx);
+        cmd.ui.setStatus(buildStatus());
+        return {message: `Rolled back "${id}" to the version archived at ${latest}. Status: candidate.${liveErr ? `\n⚠ could not remove live skill: ${liveErr}` : ''}`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -2171,19 +2196,22 @@ export default function (cmd: ModApi): void {
     handler: ({args}) => {
       const id = args.trim();
       if (!id) return {message: 'Usage: /archive <id>'};
-      const idx = loadIndex();
-      const art = idx.artifacts[id];
-      if (!art) return {message: `Artifact "${id}" not found.`};
-      art.status = 'archived';
-      art.rejection_reason = `manual archive`;
-      // An archived skill leaves .agents/skills/ — it is no longer live.
-      if (art.kind === 'skill') {
-        const rmErr = removeSkillFile(id);
-        if (rmErr) return {message: `Archive blocked: ${rmErr}`};
-      }
-      saveIndex(idx);
-      cmd.ui.setStatus(buildStatus());
-      return {message: `Archived "${id}". Searchable via /recall, no longer loads into context.`};
+      const res = withLock('index', () => {
+        const idx = loadIndex();
+        const art = idx.artifacts[id];
+        if (!art) return {message: `Artifact "${id}" not found.`};
+        art.status = 'archived';
+        art.rejection_reason = `manual archive`;
+        // An archived skill leaves .agents/skills/ — it is no longer live.
+        if (art.kind === 'skill') {
+          const rmErr = removeSkillFile(id);
+          if (rmErr) return {message: `Archive blocked: ${rmErr}`};
+        }
+        saveIndex(idx);
+        cmd.ui.setStatus(buildStatus());
+        return {message: `Archived "${id}". Searchable via /recall, no longer loads into context.`};
+      });
+      return res ?? {message: 'Learning store is busy (another session is writing) — retry.'};
     },
   });
 
@@ -2683,23 +2711,25 @@ export default function (cmd: ModApi): void {
       const passed = !failed && /\b(pass(?:ed)?|success|green|ok)\b/i.test(text);
       if (!failed && !passed) return undefined;
 
-      const idx = loadIndex();
       let changed = false;
-      for (const id of recalledThisRun) {
-        const art = idx.artifacts[id];
-        if (!art || art.status !== 'shadow') continue;
-        art.shadow_runs += 1;
-        art.last_used = new Date().toISOString();
-        if (failed) {
-          art.red += 1;
-          art.confidence = Math.max(0, art.confidence - 0.05);
-        } else {
-          art.green += 1;
-          art.confidence = Math.min(1.0, art.confidence + 0.05);
+      withLock('index', () => {
+        const idx = loadIndex();
+        for (const id of recalledThisRun) {
+          const art = idx.artifacts[id];
+          if (!art || art.status !== 'shadow') continue;
+          art.shadow_runs += 1;
+          art.last_used = new Date().toISOString();
+          if (failed) {
+            art.red += 1;
+            art.confidence = Math.max(0, art.confidence - 0.05);
+          } else {
+            art.green += 1;
+            art.confidence = Math.min(1.0, art.confidence + 0.05);
+          }
+          changed = true;
         }
-        changed = true;
-      }
-      if (changed) saveIndex(idx);
+        if (changed) saveIndex(idx);
+      });
       return undefined;
     },
   });

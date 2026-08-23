@@ -26,6 +26,17 @@ updated with every merged change.
 - Lock protocol verified by a two-process stress test (60/60 increments
   with zero lost updates).
 
+### Fixes
+
+- **learn-loop** — the second audit found small index read-modify-write
+  sites still unlocked: `/pin`, `/unpin`, `/shadow`, `/reject`, `/demote`,
+  `/rollback`, `/archive`, the 3+ corrections candidate seed, the
+  `memory-bank/graduate` handler, and the shadow-verdict updater. All now
+  hold the index lock.
+- **quality-guards / self-repair** — `extractTaskLabel` no longer mislabels
+  document phrases ("updated in the same commit.") as tasks, which stopped
+  spurious drift reminders.
+
 ### Repo
 
 - **README rewritten as a portfolio piece** — pitch, mermaid pipeline
