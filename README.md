@@ -128,6 +128,8 @@ cmd-mods/
 ├── scripts/
 │   └── check-contracts.mjs  # Mechanical cross-mod contract check (node scripts/check-contracts.mjs)
 ├── package.json             # Manifest — declares mods via glob
+├── CHANGELOG.md             # Per-mod change history
+├── AGENTS.md                # Agent guidance (changelog discipline, cache rules)
 └── README.md
 ```
 

@@ -1,10 +1,11 @@
 {
   "name": "cmd-mods",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A composable suite of Command Code mods — command-center, quality-guards, self-repair, autopilot, memory-bank, and learn-loop.",
   "files": [
     "mods",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "commandcode": {
     "mods": ["./mods/*.ts"]
