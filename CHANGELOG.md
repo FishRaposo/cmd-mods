@@ -4,6 +4,17 @@ All notable changes to the cmd-mods suite are tracked here, one entry per mod.
 This file is the single source of truth for what changed and when — keep it
 updated with every merged change.
 
+## [Unreleased]
+
+### Mods
+
+- **cache-tracker** — new: prompt-cache hit-rate observability. A pure
+  observer of `model_request_end` usage (`cacheReadTokens` /
+  `cacheWriteTokens` from the provider's input-token details): live footer
+  status, `/cache` for session/all-time history, `/cache-reset`, and one
+  JSONL line per session in `~/.commandcode/cache-tracker.jsonl`.
+  Registers no prompt hooks, so it can never affect the cache it measures.
+
 ## [1.1.0] — 2026-08-23
 
 ### Cache-hit optimization

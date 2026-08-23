@@ -13,6 +13,7 @@ learning loop, structured planning, persistence, and more. One repo, many mods.
 | `autopilot` | Verified-momentum engine: after self-repair proves the task done, spends a small, bounded trust budget on safe local follow-ups (green executes, yellow/red propose). |
 | `memory-bank` | Durable, gated project memory: `.agents/memory/` store (L1 events / L2 registry / L3 lessons), verified-episode feed, recall, graduation into `.agents/skills/`. |
 | `learn-loop` | Autonomous skills manager. Seeds candidates from user corrections, runs its own distillation turn, trials candidates as shadows, and auto-promotes them on verified self-repair verdicts — with a receipt for every move. |
+| `cache-tracker` | Prompt-cache hit-rate observability: live footer status, `/cache` history, per-session JSONL in `~/.commandcode/cache-tracker.jsonl`. Pure observer — registers no prompt hooks. |
 
 ## The pipeline
 

@@ -32,6 +32,12 @@ character re-processes the entire history.
   a guard flag, then return `undefined`).
 - New code must respect this split; reviewers should treat system-prompt
   churn as a defect.
+- Instrumentation must not change the measured: cache observability lives in
+  the `cache-tracker` mod, which registers no prompt hooks — it only
+  observes `model_request_end` usage and reports via the TUI footer,
+  `/cache`, and `~/.commandcode/cache-tracker.jsonl` (one line per run).
+  Flush in `onRunEnd` — `onSessionEnd` does not reliably fire in headless
+  one-shot processes.
 
 ## Verification gates
 

@@ -23,6 +23,7 @@ const FLAG_PREFIXES = {
   'command-center.ts': 'cc-',
   'memory-bank.ts': 'mb-',
   'learn-loop.ts': 'll-',
+  'cache-tracker.ts': 'ct-',
 };
 
 const sources = new Map();
@@ -51,7 +52,7 @@ for (const [event, emitters] of emits) {
   }
 }
 for (const [event, listeners] of ons) {
-  if (!emits.has(event) && !['tool_queued', 'tool_completed', 'tool_errored', 'turn_start', 'run_start', 'run_end', 'subagent_start', 'subagent_stop', 'subagent_progress', 'skill_loaded', 'model_request_start'].includes(event)) {
+  if (!emits.has(event) && !['tool_queued', 'tool_completed', 'tool_errored', 'turn_start', 'turn_end', 'run_start', 'run_end', 'subagent_start', 'subagent_stop', 'subagent_progress', 'skill_loaded', 'model_request_start', 'model_request_end'].includes(event)) {
     problems.push(`event "${event}" has listeners (${listeners.join(', ')}) but nothing in the suite emits it`);
   }
 }
