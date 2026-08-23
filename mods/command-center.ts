@@ -138,14 +138,13 @@ export default function (cmd: ModApi): void {
 
   // ─── Prompts ───────────────────────────────────────────────────────────
   function briefingPrompt(): string {
-    const roundInfo = round <= 1
-      ? `Round ${round}/${maxRounds()} — first pass: discover decisions`
-      : `Round ${round}/${maxRounds()} — narrowing: fewer open decisions each round`;
-
+    // Byte-stable per state: no round counter, no timestamps, no other
+    // per-turn values. The system prompt must be an identical prefix every
+    // turn of BRIEFING so the provider's prompt cache keeps its hits.
+    // Round status rides the tail via the transformContext hook below.
     return `
 ▌ COMMAND CENTER — BRIEFING MODE
 ▌ Objective: ${objective}
-▌ ${roundInfo}
 
 You are in a DECISION FUNNEL. Your job is to narrow ambiguity, not write code.
 Guide the conversation toward convergence — each round should have fewer open
@@ -386,6 +385,20 @@ COMMANDS: /commandcenter-cancel, /commandcenter-status
         case 'REVIEW':
           return reviewPrompt();
       }
+    },
+  });
+
+  // ─── Round counter: tail-injected so the BRIEFING prompt stays stable ───
+  cmd.hooks({
+    transformContext: ({messages}) => {
+      if (currentState !== 'BRIEFING') return messages;
+      const roundInfo = round <= 1
+        ? `Round ${round}/${maxRounds()} — first pass: discover decisions`
+        : `Round ${round}/${maxRounds()} — narrowing: fewer open decisions each round`;
+      return [...messages, {
+        role: 'user',
+        content: `▌ COMMAND CENTER — ${roundInfo}`,
+      } as never];
     },
   });
 
