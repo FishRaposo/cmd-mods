@@ -506,11 +506,14 @@ export default function (cmd: ModApi): void {
     description: 'Days a dismissed merge pair stays dismissed before it can be re-proposed'});
   cmd.addFlag('ll-max-skill-lines', {type: 'string', default: '300',
     description: 'Refuse a merge if the resulting skill body exceeds this many lines'});
+  cmd.addFlag('ll-usage-receipts', {type: 'boolean', default: false,
+    description: 'Write a receipt line for every learned-skill usage signal'});
 
-  function numFlag(name: string, fallback: number): number {
+  function numFlag(name: string, fallback: number, min: number = 0): number {
     const v = cmd.getFlag(name);
     const n = typeof v === 'number' ? v : parseFloat(String(v));
-    return Number.isFinite(n) ? n : fallback;
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return n;
   }
 
   function boolFlag(name: string, fallback: boolean): boolean {
@@ -856,7 +859,7 @@ export default function (cmd: ModApi): void {
 
   // ── Decay: archive stale active artifacts ───────────────────────────────
   function applyDecay(): void {
-    const days = numFlag('ll-decay-days', 90);
+    const days = numFlag('ll-decay-days', 90, 1);
     if (days <= 0) return;
     const cutoff = Date.now() - days * 86400000;
     const idx = loadIndex();
@@ -931,7 +934,7 @@ export default function (cmd: ModApi): void {
 
   // ── Prune: graveyard stale candidates and failed shadows ────────────────
   function applyPruning(): void {
-    const ttlDays = numFlag('ll-candidate-ttl-days', 30);
+    const ttlDays = numFlag('ll-candidate-ttl-days', 30, 1);
     const now = Date.now();
     const idx = loadIndex();
     const toPrune: {id: string; art: Artifact; reason: string}[] = [];
@@ -1057,7 +1060,10 @@ export default function (cmd: ModApi): void {
     const keepDir = path.join(LEARNING_DIR, keep.path);
     if (fs.existsSync(keepDir)) {
       const backupRel = path.join('graveyard', keepId, `pre-merge-${stamp}`).split(path.sep).join('/');
-      moveDir(keepDir, path.join(LEARNING_DIR, backupRel));
+      ensureDir(path.dirname(path.join(LEARNING_DIR, backupRel)));
+      // Copy, not move: the survivor stays in place so its supporting files
+      // (references/, scripts/) keep their live layout.
+      fs.cpSync(keepDir, path.join(LEARNING_DIR, backupRel), {recursive: true});
     }
     const absorbDir = path.join(LEARNING_DIR, absorb.path);
     if (fs.existsSync(absorbDir)) {
@@ -1068,19 +1074,18 @@ export default function (cmd: ModApi): void {
     absorb.status = 'archived';
     absorb.rejection_reason = `merged into ${keepId}`;
 
-    // Rewrite the survivor's content with the merged body.
-    const keepNewDir = path.join(CANDIDATES_DIR, keepId);
-    ensureDir(keepNewDir);
-    fs.writeFileSync(path.join(keepNewDir, 'skill.md'), mergedBody);
-    keep.path = `candidates/${keepId}`;
+    // Rewrite the survivor's main file IN PLACE — path, kind layout, and
+    // supporting files all stay exactly where they were.
+    fs.writeFileSync(keepFile, mergedBody);
     keep.version = (keep.version ?? 0) + 1;
     keep.use_count = (keep.use_count ?? 0) + (absorb.use_count ?? 0);
     keep.tags = [...new Set([...keep.tags, ...absorb.tags])];
 
     // Re-sync the live install so the merged content is what agents load.
     const syncErr = syncInstalledSkill(keep);
-    if (syncErr) return {ok: false, error: `merge content written but live sync failed: ${syncErr}`};
 
+    // Persist no matter what: an early return here would leave the index
+    // pointing at directories that were already moved into the graveyard.
     saveIndex(idx);
     writeReceipt({
       action: 'merge',
@@ -1089,9 +1094,12 @@ export default function (cmd: ModApi): void {
       absorb: absorbId,
       similarity: mergeSimilarity(keep, absorb),
       version: keep.version,
+      ...(syncErr ? {syncError: syncErr} : {}),
     });
     cmd.ui.setStatus(buildStatus());
-    return {ok: true};
+    return syncErr
+      ? {ok: false, error: `merge recorded, but live sync failed: ${syncErr}`}
+      : {ok: true};
   }
 
   // ── Merge proposals: mechanical pre-filter + agent judgment ──────────────
@@ -1146,7 +1154,7 @@ export default function (cmd: ModApi): void {
   function buildMergeReviewPrompt(pairs: {keep: string; absorb: string; sim: number}[]): string {
     return [
       'MERGE REVIEW — pairs of learned skills overlap mechanically. Your judgment call.',
-      'Read BOTH full skill bodies for each pair before deciding (use read_file on .agents/learning/active/skill/<id>/skill.md).',
+      'Read BOTH full skill bodies for each pair before deciding (find each artifact\'s path via /learn status, then read_file its main file under .agents/learning/).',
       '',
       ...pairs.map((p, i) => `${i + 1}. ${p.keep} + ${p.absorb} (mechanical similarity ${p.sim.toFixed(2)})`),
       '',
@@ -1839,9 +1847,7 @@ export default function (cmd: ModApi): void {
     }
 
     const skillNote = art.kind === 'skill'
-      ? (skillErr
-        ? `\n⚠ skill file NOT installed: ${skillErr}`
-        : `\n→ live skill installed at .agents/skills/${id}/SKILL.md`)
+      ? `\n→ live skill installed at .agents/skills/${id}/SKILL.md`
       : '';
     return {
       ok: true,
@@ -1876,6 +1882,12 @@ export default function (cmd: ModApi): void {
       art.rejection_reason = reason;
       art.rejections += 1;
 
+      // A rejected skill leaves .agents/skills/ — it is no longer live.
+      // (Refusal for a foreign dir leaves the status recorded but the live
+      // install untouched, which is exactly the ownership boundary.)
+      let liveErr: string | null = null;
+      if (art.kind === 'skill') liveErr = removeSkillFile(id);
+
       // Move to graveyard under a timestamped version dir
       if (art.path.startsWith('candidates/')) {
         const graveRel = path.join('graveyard', id, Date.now().toString(36))
@@ -1886,7 +1898,7 @@ export default function (cmd: ModApi): void {
 
       saveIndex(idx);
       cmd.ui.setStatus(buildStatus());
-      return {message: `Rejected "${id}": ${reason}`};
+      return {message: `Rejected "${id}": ${reason}${liveErr ? `\n⚠ could not remove live skill: ${liveErr}` : ''}`};
     },
   });
 
@@ -1989,12 +2001,17 @@ export default function (cmd: ModApi): void {
         if (fs.readdirSync(graveRoot).length === 0) fs.rmdirSync(graveRoot);
       } catch { /* ok */ }
 
+      // The rolled-back artifact is a candidate again — a live skill install
+      // from its previous life must go.
+      let liveErr: string | null = null;
+      if (art.kind === 'skill') liveErr = removeSkillFile(id);
+
       art.path = newRel;
       art.status = 'candidate';
       art.rejection_reason = undefined;
       saveIndex(idx);
       cmd.ui.setStatus(buildStatus());
-      return {message: `Rolled back "${id}" to the version archived at ${latest}. Status: candidate.`};
+      return {message: `Rolled back "${id}" to the version archived at ${latest}. Status: candidate.${liveErr ? `\n⚠ could not remove live skill: ${liveErr}` : ''}`};
     },
   });
 
@@ -2533,9 +2550,9 @@ export default function (cmd: ModApi): void {
   // ── Initialize ──────────────────────────────────────────────────────────
   ensureDir(LEARNING_DIR);
   ensureDir(CANDIDATES_DIR);
-  ensureDir(path.join(ACTIVE_DIR, 'skills'));
+  ensureDir(path.join(ACTIVE_DIR, 'skill'));
   ensureDir(path.join(ACTIVE_DIR, 'taste'));
-  ensureDir(path.join(ACTIVE_DIR, 'warnings'));
+  ensureDir(path.join(ACTIVE_DIR, 'warning'));
   ensureDir(GRAVEYARD_DIR);
 
   // Set initial footer status (safe in case UI isn't bound yet)
