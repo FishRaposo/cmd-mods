@@ -6,6 +6,18 @@ updated with every merged change.
 
 ## [Unreleased]
 
+### Fixes
+
+- **command-center, quality-guards, learn-loop, memory-bank** — injected
+  context messages now use array content blocks (`content: [{type: 'text',
+  text}]`) instead of raw strings. The harness's wire projection assumes
+  `message.content` is always an array and crashed with
+  `message.content.filter is not a function` when a string-content message
+  reached it — intermittently, on interactive turns that triggered recall
+  or warnings. Verified by reading the session transcript (the crash was
+  in the harness's own projection path, mods never wrote to the durable
+  store).
+
 ### Mods
 
 - **cache-tracker** — new: prompt-cache hit-rate observability. A pure

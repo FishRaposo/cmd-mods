@@ -603,7 +603,9 @@ export default function (cmd: ModApi): void {
       // Insert directly before the final user message (cache-optimal tail
       // position): only the last array entry falls outside the cached
       // prefix, instead of the last two from a length-2 splice.
-      result.splice(Math.max(0, result.length - 1), 0, {role: 'user', content: block} as never);
+      // Array content blocks — the harness's wire projection assumes
+      // message.content is always an array; string content crashes it.
+      result.splice(Math.max(0, result.length - 1), 0, {role: 'user', content: [{type: 'text', text: block}]} as never);
       return result;
     },
   });

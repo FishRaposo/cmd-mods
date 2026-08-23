@@ -397,7 +397,9 @@ COMMANDS: /commandcenter-cancel, /commandcenter-status
         : `Round ${round}/${maxRounds()} — narrowing: fewer open decisions each round`;
       return [...messages, {
         role: 'user',
-        content: `▌ COMMAND CENTER — ${roundInfo}`,
+        // Array content blocks — the harness's wire projection assumes
+        // message.content is always an array; string content crashes it.
+        content: [{type: 'text', text: `▌ COMMAND CENTER — ${roundInfo}`}],
       } as never];
     },
   });

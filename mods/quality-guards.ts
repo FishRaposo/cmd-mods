@@ -540,7 +540,9 @@ export default function (cmd: ModApi): void {
       if (prompts.length === 0) return messages;
       return [...messages, {
         role: 'user',
-        content: `[quality-guards] Advisory:\n${prompts.join('\n')}`,
+        // Array content blocks — the harness's wire projection assumes
+        // message.content is always an array; string content crashes it.
+        content: [{type: 'text', text: `[quality-guards] Advisory:\n${prompts.join('\n')}`}],
       } as never];
     },
   });
