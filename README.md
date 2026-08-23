@@ -85,15 +85,34 @@ visible in `/learn status` but never modified, merged into, or deleted.
 
 ## Install a single mod
 
+Install the suite, then keep only the mods you want via the object form of
+`mods.sources` in your Command Code settings (`~/.commandcode/settings.json`
+for user scope):
+
 ```bash
-cmd mods add your-username/cmd-mods --mods "learn-loop.ts"
+commandcode mods add -g your-username/cmd-mods
+```
+
+```json
+{
+  "mods": {
+    "sources": [
+      {"source": "your-username/cmd-mods", "mods": ["learn-loop.ts"]}
+    ]
+  }
+}
 ```
 
 ## Install the full suite
 
 ```bash
-cmd mods add your-username/cmd-mods
+commandcode mods add -g your-username/cmd-mods
+commandcode mods list    # verify: six mods, zero load warnings
 ```
+
+Drop `-g` to install project-scoped instead of user-scoped. On Windows the
+binary is `commandcode` (alias `command-code`); docs elsewhere shorten it
+to `cmd`.
 
 ## Project structure
 
@@ -106,6 +125,8 @@ cmd-mods/
 │   ├── autopilot.ts
 │   ├── memory-bank.ts
 │   └── learn-loop.ts
+├── scripts/
+│   └── check-contracts.mjs  # Mechanical cross-mod contract check (node scripts/check-contracts.mjs)
 ├── package.json             # Manifest — declares mods via glob
 └── README.md
 ```
