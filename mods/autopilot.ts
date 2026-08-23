@@ -241,10 +241,11 @@ export default function (cmd: ModApi): void {
   cmd.addFlag('auto-forbidden', {type: 'string', default: 'push,publish,deploy,migrate',
     description: 'Comma-separated forbidden command substrings'});
 
-  function numFlag(name: string, fallback: number): number {
+  function numFlag(name: string, fallback: number, min: number = 0): number {
     const v = cmd.getFlag(name);
     const n = typeof v === 'number' ? v : parseInt(String(v), 10);
-    return Number.isFinite(n) ? n : fallback;
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return n;
   }
 
   // ── Mandate resolution ──────────────────────────────────────────────────
@@ -336,6 +337,14 @@ export default function (cmd: ModApi): void {
   cmd.events.on('self-repair/verdict', (raw) => {
     const v = (raw ?? {}) as Record<string, unknown>;
     if (v.final !== true || v.complete !== true) return;
+    const childOfCurrentAction = currentActionId !== null &&
+      typeof v.cycleId === 'string' && String(v.cycleId).includes('/' + currentActionId);
+    if (childOfCurrentAction) {
+      // The action's child verification cycle finished: the action's lifetime
+      // ends here. Guard-state must not leak into subsequent turns.
+      currentActionId = null;
+      updateStatus();
+    }
     const verdict: RepairVerdict = {
       version: typeof v.version === 'number' ? v.version : 0,
       cycleId: typeof v.cycleId === 'string' ? v.cycleId : 'unknown',
@@ -644,8 +653,10 @@ export default function (cmd: ModApi): void {
         return undefined;
       }
 
-      // Build the backlog once per verified cycle.
+      // Build the backlog once per verified cycle. A stale backlog from a
+      // prior cycle must never leak actions into this one.
       if (backlog.length === 0) buildBacklog();
+      else backlog.forEach(a => { if (a.status === 'doing') a.status = 'queued'; });
 
       const action = nextGreen();
       if (!action) {
