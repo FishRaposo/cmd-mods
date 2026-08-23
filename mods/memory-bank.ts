@@ -238,6 +238,101 @@ export default function (cmd: ModApi): void {
   const ledgerPath = path.join(storeDir, 'episodes.jsonl');
   const recallStatsPath = path.join(storeDir, 'recall-stats.json');
 
+  // ── Cross-process file lock (parallel sessions share these files) ───────
+  // Same protocol as learn-loop: mutually-exclusive mkdir + atomic rename,
+  // reentrant per process, ~10s wait then stale-steal. Deliberately
+  // duplicated so every mod stays standalone-installable.
+  const MB_LOCK_KEYS = new Map<string, {depth: number}>();
+  const MB_LOCK_WAIT_MS = 10000;
+  const MB_LOCK_RETRY_MS = 40;
+
+  function mbLockTarget(key: string): string {
+    return path.join(storeDir, '.locks', `${key.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}.lock`);
+  }
+
+  function mbLockHolder(lockDir: string): string {
+    try {
+      return fs.readFileSync(path.join(lockDir, 'owner.json'), 'utf-8').trim();
+    } catch {
+      return '?';
+    }
+  }
+
+  function mbIsProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  function mbSleepMs(ms: number): void {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* spin */ }
+  }
+
+  function mbAcquireLock(key: string): (() => void) | null {
+    const existing = MB_LOCK_KEYS.get(key);
+    if (existing) {
+      existing.depth += 1;
+      return () => {
+        existing.depth -= 1;
+        if (existing.depth <= 0) MB_LOCK_KEYS.delete(key);
+      };
+    }
+    const target = mbLockTarget(key);
+    try { ensureDir(path.dirname(target)); } catch { /* best-effort */ }
+    const started = Date.now();
+    const tmp = target + '.tmp-' + process.pid;
+    while (true) {
+      try {
+        fs.mkdirSync(tmp, {recursive: false});
+        try {
+          fs.renameSync(tmp, target);
+        } catch {
+          fs.rmSync(tmp, {recursive: true, force: true});
+          if (Date.now() - started > MB_LOCK_WAIT_MS) {
+            const holder = mbLockHolder(target);
+            if (/^\d+$/.test(holder) && !mbIsProcessAlive(Number(holder))) {
+              fs.rmSync(target, {recursive: true, force: true});
+              continue;
+            }
+            return null;
+          }
+          mbSleepMs(MB_LOCK_RETRY_MS);
+          continue;
+        }
+      } catch {
+        if (Date.now() - started > MB_LOCK_WAIT_MS) return null;
+        mbSleepMs(MB_LOCK_RETRY_MS);
+        continue;
+      }
+      try {
+        fs.writeFileSync(path.join(target, 'owner.json'),
+          JSON.stringify({pid: process.pid, ts: new Date().toISOString()}));
+      } catch { /* lock held even without metadata */ }
+      const handle = {depth: 1};
+      MB_LOCK_KEYS.set(key, handle);
+      return () => {
+        handle.depth -= 1;
+        if (handle.depth > 0) return;
+        MB_LOCK_KEYS.delete(key);
+        try { fs.rmSync(target, {recursive: true, force: true}); } catch { /* stale later */ }
+      };
+    }
+  }
+
+  function mbWithLock<T>(key: string, fn: () => T): T | null {
+    const release = mbAcquireLock(key);
+    if (!release) return null;
+    try {
+      return fn();
+    } finally {
+      release();
+    }
+  }
+
   function bootstrapStore(): void {
     ensureDir(storeDir);
     ensureDir(l3Dir);
@@ -300,27 +395,31 @@ export default function (cmd: ModApi): void {
   }
 
   function prependL1Entry(date: string, id: number, title: string, body: string): void {
-    bootstrapStore();
-    const raw = stripBom(fs.readFileSync(l1Path, 'utf-8'));
-    const marker = '## Event Log';
-    const idx = raw.indexOf(marker);
-    if (idx < 0) return;
-    const head = raw.slice(0, idx + marker.length);
-    const tail = raw.slice(idx + marker.length);
-    const entry = `\n\n### ${date} — evt-${String(id).padStart(4, '0')} — ${title}\n${body}\n`;
+    // Locked: read-modify-write of L1-EVENTS.md + archive compaction — two
+    // parallel sessions prepending at once would interleave and corrupt.
+    mbWithLock('l1', () => {
+      bootstrapStore();
+      const raw = stripBom(fs.readFileSync(l1Path, 'utf-8'));
+      const marker = '## Event Log';
+      const idx = raw.indexOf(marker);
+      if (idx < 0) return;
+      const head = raw.slice(0, idx + marker.length);
+      const tail = raw.slice(idx + marker.length);
+      const entry = `\n\n### ${date} — evt-${String(id).padStart(4, '0')} — ${title}\n${body}\n`;
 
-    // The event log tail starts with a "<!-- Newest first -->" comment after
-    // bootstrap. Insert the entry right after it; otherwise fall back to a
-    // plain append after the "## Event Log" heading.
-    const commentIdx = tail.indexOf('<!-- Newest first -->');
-    if (commentIdx >= 0) {
-      const commentEnd = commentIdx + '<!-- Newest first -->'.length;
-      const newTail = tail.slice(0, commentEnd) + entry + tail.slice(commentEnd);
-      fs.writeFileSync(l1Path, head + newTail);
-    } else {
-      fs.writeFileSync(l1Path, head + entry + tail);
-    }
-    compactL1();
+      // The event log tail starts with a "<!-- Newest first -->" comment after
+      // bootstrap. Insert the entry right after it; otherwise fall back to a
+      // plain append after the "## Event Log" heading.
+      const commentIdx = tail.indexOf('<!-- Newest first -->');
+      if (commentIdx >= 0) {
+        const commentEnd = commentIdx + '<!-- Newest first -->'.length;
+        const newTail = tail.slice(0, commentEnd) + entry + tail.slice(commentEnd);
+        fs.writeFileSync(l1Path, head + newTail);
+      } else {
+        fs.writeFileSync(l1Path, head + entry + tail);
+      }
+      compactL1();
+    });
   }
 
   function compactL1(): void {
@@ -361,19 +460,22 @@ export default function (cmd: ModApi): void {
   function addL2Row(section: string, cells: string[]): string | null {
     if (!L2_SECTIONS.includes(section)) return `Unknown section: ${section}`;
     if (cells.length === 0 || cells.some(c => c.includes('|'))) return 'Cells must not contain pipes';
-    const raw = readL2();
-    const lines = raw.split(/\r?\n/);
-    const secIdx = lines.findIndex(l => l.trim() === section);
-    if (secIdx < 0) return `Section ${section} missing`;
-    // Insert after the header separator row (## --- | --- row).
-    let insertAt = secIdx + 2;
-    while (insertAt < lines.length && lines[insertAt].trim() !== '' && lines[insertAt].includes('|')) {
-      insertAt++;
-    }
-    const row = '| ' + cells.join(' | ') + ' |';
-    lines.splice(insertAt, 0, row);
-    fs.writeFileSync(l2Path, lines.join('\n'));
-    return null;
+    // Locked: read-modify-write of L2-REGISTRY.md.
+    return mbWithLock('l2', () => {
+      const raw = readL2();
+      const lines = raw.split(/\r?\n/);
+      const secIdx = lines.findIndex(l => l.trim() === section);
+      if (secIdx < 0) return `Section ${section} missing`;
+      // Insert after the header separator row (## --- | --- row).
+      let insertAt = secIdx + 2;
+      while (insertAt < lines.length && lines[insertAt].trim() !== '' && lines[insertAt].includes('|')) {
+        insertAt++;
+      }
+      const row = '| ' + cells.join(' | ') + ' |';
+      lines.splice(insertAt, 0, row);
+      fs.writeFileSync(l2Path, lines.join('\n'));
+      return null;
+    });
   }
 
   // L2 rows are pointers — the store contract requires update/remove when a
@@ -402,22 +504,26 @@ export default function (cmd: ModApi): void {
   function updateL2Row(section: string, firstCell: string, cells: string[]): string | null {
     if (!L2_SECTIONS.includes(section)) return `Unknown section: ${section}`;
     if (cells.length === 0 || cells.some(c => c.includes('|'))) return 'Cells must not contain pipes';
-    const lines = readL2().split(/\r?\n/);
-    const rowIdx = findL2Row(section, firstCell);
-    if (rowIdx < 0) return `No row with first cell "${firstCell}" in ${section}`;
-    lines[rowIdx] = '| ' + cells.join(' | ') + ' |';
-    fs.writeFileSync(l2Path, lines.join('\n'));
-    return null;
+    return mbWithLock('l2', () => {
+      const lines = readL2().split(/\r?\n/);
+      const rowIdx = findL2Row(section, firstCell);
+      if (rowIdx < 0) return `No row with first cell "${firstCell}" in ${section}`;
+      lines[rowIdx] = '| ' + cells.join(' | ') + ' |';
+      fs.writeFileSync(l2Path, lines.join('\n'));
+      return null;
+    });
   }
 
   function removeL2Row(section: string, firstCell: string): string | null {
     if (!L2_SECTIONS.includes(section)) return `Unknown section: ${section}`;
-    const lines = readL2().split(/\r?\n/);
-    const rowIdx = findL2Row(section, firstCell);
-    if (rowIdx < 0) return `No row with first cell "${firstCell}" in ${section}`;
-    lines.splice(rowIdx, 1);
-    fs.writeFileSync(l2Path, lines.join('\n'));
-    return null;
+    return mbWithLock('l2', () => {
+      const lines = readL2().split(/\r?\n/);
+      const rowIdx = findL2Row(section, firstCell);
+      if (rowIdx < 0) return `No row with first cell "${firstCell}" in ${section}`;
+      lines.splice(rowIdx, 1);
+      fs.writeFileSync(l2Path, lines.join('\n'));
+      return null;
+    });
   }
 
   // ── L3 helpers ──────────────────────────────────────────────────────────
@@ -495,20 +601,25 @@ export default function (cmd: ModApi): void {
   }
 
   function recordRecallUse(title: string, isLesson: boolean): void {
-    const stats = loadRecallStats();
-    stats.lastUse[title] = Date.now();
-    if (isLesson) {
-      stats.counts[title] = (stats.counts[title] ?? 0) + 1;
-    }
-    saveRecallStats(stats);
+    // Locked: load→modify→save of recall-stats.json.
+    mbWithLock('stats', () => {
+      const stats = loadRecallStats();
+      stats.lastUse[title] = Date.now();
+      if (isLesson) {
+        stats.counts[title] = (stats.counts[title] ?? 0) + 1;
+      }
+      saveRecallStats(stats);
+    });
   }
 
   function markGraduated(file: string): void {
-    const stats = loadRecallStats();
-    if (!stats.graduated.includes(file)) {
-      stats.graduated.push(file);
-      saveRecallStats(stats);
-    }
+    mbWithLock('stats', () => {
+      const stats = loadRecallStats();
+      if (!stats.graduated.includes(file)) {
+        stats.graduated.push(file);
+        saveRecallStats(stats);
+      }
+    });
   }
 
   function graduateLessonToLearnLoop(lesson: LessonMeta): void {
@@ -535,15 +646,20 @@ export default function (cmd: ModApi): void {
   function maybeAutoGraduate(): void {
     if (!boolFlag('mb-auto-graduate', true)) return;
     const threshold = numFlag('mb-graduate-after', 3, 1);
-    const stats = loadRecallStats();
-    const alreadyGraduated = new Set(stats.graduated);
-    for (const lesson of listLessons()) {
-      if (alreadyGraduated.has(lesson.file) || graduated.has(lesson.file)) continue;
-      if (lesson.confidence !== 'high' && lesson.confidence !== 'medium') continue;
-      if ((stats.counts[lesson.title] ?? 0) < threshold) continue;
-      graduateLessonToLearnLoop(lesson);
-      prependL1Entry(today(), nextEventId(), `Auto-graduated lesson to skill: ${lesson.title}`, `Lesson "${lesson.title}" crossed ${threshold} recalls and was handed to learn-loop.`);
-    }
+    // Locked: graduate/markGraduated/prependL1 are each individually locked,
+    // but the sweep itself reads counts then graduates — hold the stats lock
+    // across the sweep so two sessions can't graduate the same lesson twice.
+    mbWithLock('stats', () => {
+      const stats = loadRecallStats();
+      const alreadyGraduated = new Set(stats.graduated);
+      for (const lesson of listLessons()) {
+        if (alreadyGraduated.has(lesson.file) || graduated.has(lesson.file)) continue;
+        if (lesson.confidence !== 'high' && lesson.confidence !== 'medium') continue;
+        if ((stats.counts[lesson.title] ?? 0) < threshold) continue;
+        graduateLessonToLearnLoop(lesson);
+        prependL1Entry(today(), nextEventId(), `Auto-graduated lesson to skill: ${lesson.title}`, `Lesson "${lesson.title}" crossed ${threshold} recalls and was handed to learn-loop.`);
+      }
+    });
   }
 
   cmd.events.on('self-repair/verdict', (raw) => {
@@ -563,7 +679,9 @@ export default function (cmd: ModApi): void {
     };
     try {
       bootstrapStore();
-      fs.appendFileSync(ledgerPath, JSON.stringify(episode) + '\n');
+      mbWithLock('ledger', () => {
+        fs.appendFileSync(ledgerPath, JSON.stringify(episode) + '\n');
+      });
     } catch { /* ledger is best-effort */ }
 
     const title = `Verified completion: ${cycleId}`;
@@ -857,9 +975,11 @@ export default function (cmd: ModApi): void {
           if (found) lineNo = found.line;
         }
         if (lineNo < 0) return {message: `No episode matches "${target}".`};
-        const raw = fs.readFileSync(ledgerPath, 'utf-8').split('\n');
-        raw[lineNo - 1] = JSON.stringify({_tombstone: true, _deleted: new Date().toISOString(), _target: target});
-        fs.writeFileSync(ledgerPath, raw.join('\n'));
+        mbWithLock('ledger', () => {
+          const raw = fs.readFileSync(ledgerPath, 'utf-8').split('\n');
+          raw[lineNo - 1] = JSON.stringify({_tombstone: true, _deleted: new Date().toISOString(), _target: target});
+          fs.writeFileSync(ledgerPath, raw.join('\n'));
+        });
         return {message: `Forgot episode #${lineNo}.`};
       }
 

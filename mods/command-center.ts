@@ -181,7 +181,10 @@ Use read_file, glob, grep, read_directory, web_search, and web_fetch only.
 
   function compilationPrompt(): string {
     const rp = resolvedPlanPath();
-    const filename = `command-center-${todaySlug()}-${slugify(objective)}.md`;
+    // Timestamped filename: two parallel sessions briefing the same
+    // objective would otherwise compile to the SAME plan path and clobber
+    // each other's artifact.
+    const filename = `command-center-${todaySlug()}-${Date.now().toString(36)}-${slugify(objective)}.md`;
     const fullPath = `${rp}${filename}`;
     compiledPlanPath = fullPath;
 

@@ -109,6 +109,116 @@ let AUTONOMY_PATH = path.join(LEARNING_DIR, 'autonomy.jsonl');
 // Persistent merge-pair dismissals: agent judgment "these are different jobs".
 let MERGE_DISMISSALS_FILE = path.join(LEARNING_DIR, 'merge-dismissals.json');
 
+// ── Cross-process file lock ──────────────────────────────────────────────
+// Parallel Command Code sessions run in separate processes but share this
+// project's store files. Read-modify-write sequences (loadIndex→saveIndex,
+// episode appends, skill-dir moves) must not interleave. The lock is a
+// mutually-exclusive mkdir with an atomic rename — no dependency, works
+// across processes, and the metadata file records who holds it.
+//
+// Reentrant per process: nested acquire() calls from the same process share
+// one lock handle (a depth counter), so saveIndex inside a locked region
+// doesn't self-deadlock. Cross-process waiters retry for up to ~10s, then
+// steal a lock whose holder is gone (stale) — the mutex never hard-blocks.
+const LOCK_KEYS = new Map<string, {depth: number}>();
+const LOCK_WAIT_MS = 10000;
+const LOCK_RETRY_MS = 40;
+
+function lockTarget(key: string): string {
+  return path.join(LEARNING_DIR, '.locks', `${slugifyLock(key)}.lock`);
+}
+
+function slugifyLock(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
+}
+
+function lockHolder(lockDir: string): string {
+  try {
+    return fs.readFileSync(path.join(lockDir, 'owner.json'), 'utf-8').trim();
+  } catch {
+    return '?';
+  }
+}
+
+function acquireLock(key: string): (() => void) | null {
+  const existing = LOCK_KEYS.get(key);
+  if (existing) {
+    existing.depth += 1;
+    return () => {
+      existing.depth -= 1;
+      if (existing.depth <= 0) LOCK_KEYS.delete(key);
+    };
+  }
+  const target = lockTarget(key);
+  try { ensureDir(path.dirname(target)); } catch { /* best-effort */ }
+  const started = Date.now();
+  const tmp = target + '.tmp-' + process.pid;
+  while (true) {
+    try {
+      fs.mkdirSync(tmp, {recursive: false});
+      try {
+        fs.renameSync(tmp, target);
+      } catch {
+        // Another process won the race or holds the lock.
+        fs.rmSync(tmp, {recursive: true, force: true});
+        if (Date.now() - started > LOCK_WAIT_MS) {
+          // Stale-steal: holder pid no longer alive.
+          const holder = lockHolder(target);
+          if (/^\d+$/.test(holder) && !isProcessAlive(Number(holder))) {
+            fs.rmSync(target, {recursive: true, force: true});
+            continue;
+          }
+          return null;
+        }
+        sleepMs(LOCK_RETRY_MS);
+        continue;
+      }
+    } catch {
+      if (Date.now() - started > LOCK_WAIT_MS) return null;
+      sleepMs(LOCK_RETRY_MS);
+      continue;
+    }
+    try {
+      fs.writeFileSync(path.join(target, 'owner.json'),
+        JSON.stringify({pid: process.pid, ts: new Date().toISOString()}));
+    } catch { /* lock is held even without metadata */ }
+    const handle = {depth: 1};
+    LOCK_KEYS.set(key, handle);
+    return () => {
+      handle.depth -= 1;
+      if (handle.depth > 0) return;
+      LOCK_KEYS.delete(key);
+      try { fs.rmSync(target, {recursive: true, force: true}); } catch { /* stale later */ }
+    };
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function sleepMs(ms: number): void {
+  const until = Date.now() + ms;
+  // Busy-wait is fine here: contention is rare, and SyncFS calls must not
+  // yield to timers (node timers don't fire during tight sync loops).
+  while (Date.now() < until) { /* spin */ }
+}
+
+function withLock<T>(key: string, fn: () => T): T | null {
+  const release = acquireLock(key);
+  if (!release) return null;
+  try {
+    return fn();
+  } finally {
+    release();
+  }
+}
+
 function writeReceipt(entry: Record<string, unknown>): void {
   try {
     ensureDir(LEARNING_DIR);
@@ -154,11 +264,16 @@ function saveIndex(idx: IndexData): void {
 }
 
 function appendEpisode(ep: Episode): void {
-  ensureDir(LEARNING_DIR);
-  fs.appendFileSync(EPISODES_PATH, JSON.stringify(ep) + '\n');
-  const idx = loadIndex();
-  idx.episode_count += 1;
-  saveIndex(idx);
+  // Locked: two parallel sessions flushing at once would interleave the
+  // append and the index count bump, dropping episodes or corrupting the
+  // file. Best-effort under contention (skip rather than corrupt).
+  withLock('episodes', () => {
+    ensureDir(LEARNING_DIR);
+    fs.appendFileSync(EPISODES_PATH, JSON.stringify(ep) + '\n');
+    const idx = loadIndex();
+    idx.episode_count += 1;
+    saveIndex(idx);
+  });
 }
 
 function readEpisodeLines(): EpisodeLine[] {
@@ -182,15 +297,17 @@ function isTombstone(data: Record<string, unknown>): boolean {
 }
 
 function replaceEpisodeLine(line: number, data: Record<string, unknown>): void {
-  try {
-    if (!fs.existsSync(EPISODES_PATH)) return;
-    const raw = fs.readFileSync(EPISODES_PATH, 'utf-8').split('\n');
-    if (line < 1 || line > raw.length) return;
-    raw[line - 1] = JSON.stringify(data);
-    const tmp = EPISODES_PATH + '.tmp';
-    fs.writeFileSync(tmp, raw.join('\n'));
-    fs.renameSync(tmp, EPISODES_PATH);
-  } catch { /* ok */ }
+  withLock('episodes', () => {
+    try {
+      if (!fs.existsSync(EPISODES_PATH)) return;
+      const raw = fs.readFileSync(EPISODES_PATH, 'utf-8').split('\n');
+      if (line < 1 || line > raw.length) return;
+      raw[line - 1] = JSON.stringify(data);
+      const tmp = EPISODES_PATH + '.tmp';
+      fs.writeFileSync(tmp, raw.join('\n'));
+      fs.renameSync(tmp, EPISODES_PATH);
+    } catch { /* ok */ }
+  });
 }
 
 function slugify(text: string): string {
@@ -843,17 +960,19 @@ export default function (cmd: ModApi): void {
   // NONE of these signals fired within the decay window.
   function recordSkillUse(name: string, source: string): void {
     if (!name || !isManagedSkillDir(name)) return;
-    const idx = loadIndex();
-    const art = idx.artifacts[name];
-    if (art && art.kind === 'skill' && art.status === 'active') {
-      art.last_used = new Date().toISOString();
-      art.use_count = (art.use_count ?? 0) + 1;
-      activeSkillsUsedThisRun.add(name);
-      saveIndex(idx);
-      if (boolFlag('ll-usage-receipts', false)) {
-        writeReceipt({action: 'skill-use', id: name, source});
+    withLock('index', () => {
+      const idx = loadIndex();
+      const art = idx.artifacts[name];
+      if (art && art.kind === 'skill' && art.status === 'active') {
+        art.last_used = new Date().toISOString();
+        art.use_count = (art.use_count ?? 0) + 1;
+        activeSkillsUsedThisRun.add(name);
+        saveIndex(idx);
+        if (boolFlag('ll-usage-receipts', false)) {
+          writeReceipt({action: 'skill-use', id: name, source});
+        }
       }
-    }
+    });
   }
 
   cmd.on('model_request_start', event => {
@@ -867,26 +986,28 @@ export default function (cmd: ModApi): void {
     const days = numFlag('ll-decay-days', 90, 1);
     if (days <= 0) return;
     const cutoff = Date.now() - days * 86400000;
-    const idx = loadIndex();
-    let changed = false;
-    for (const [id, art] of Object.entries(idx.artifacts)) {
-      if (art.status !== 'active' || art.pinned) continue;
-      // Never-used skills age from creation, not last_used — otherwise they
-      // are accidentally immortal.
-      const lastActivity = art.last_used || art.created;
-      if (!lastActivity) continue;
-      if (Date.parse(lastActivity) < cutoff) {
-        art.status = 'archived';
-        art.rejection_reason = `decay: unused for ${days}d`;
-        // Archived skills leave .agents/skills/ — they are no longer live.
-        if (art.kind === 'skill') {
-          const rmErr = removeSkillFile(id);
-          if (!rmErr) writeReceipt({action: 'archive', id, reason: 'decay', days});
+    withLock('index', () => {
+      const idx = loadIndex();
+      let changed = false;
+      for (const [id, art] of Object.entries(idx.artifacts)) {
+        if (art.status !== 'active' || art.pinned) continue;
+        // Never-used skills age from creation, not last_used — otherwise they
+        // are accidentally immortal.
+        const lastActivity = art.last_used || art.created;
+        if (!lastActivity) continue;
+        if (Date.parse(lastActivity) < cutoff) {
+          art.status = 'archived';
+          art.rejection_reason = `decay: unused for ${days}d`;
+          // Archived skills leave .agents/skills/ — they are no longer live.
+          if (art.kind === 'skill') {
+            const rmErr = removeSkillFile(id);
+            if (!rmErr) writeReceipt({action: 'archive', id, reason: 'decay', days});
+          }
+          changed = true;
         }
-        changed = true;
       }
-    }
-    if (changed) saveIndex(idx);
+      if (changed) saveIndex(idx);
+    });
   }
 
   // ── Deletion: purge archived artifacts after the deletion window ─────────
@@ -894,90 +1015,94 @@ export default function (cmd: ModApi): void {
     const days = numFlag('ll-auto-delete-days', 180);
     if (days <= 0) return;
     const cutoff = Date.now() - days * 86400000;
-    const idx = loadIndex();
-    const toDelete: {id: string; art: Artifact}[] = [];
+    withLock('index', () => {
+      const idx = loadIndex();
+      const toDelete: {id: string; art: Artifact}[] = [];
 
-    for (const [id, art] of Object.entries(idx.artifacts)) {
-      if (art.pinned) continue;
-      if (art.status !== 'archived') continue;
-      // Age from last_used when known, else from creation — never skip
-      // never-used artifacts.
-      const lastActivity = art.last_used || art.created;
-      if (!lastActivity) continue;
-      if (Date.parse(lastActivity) < cutoff) {
-        toDelete.push({id, art});
+      for (const [id, art] of Object.entries(idx.artifacts)) {
+        if (art.pinned) continue;
+        if (art.status !== 'archived') continue;
+        // Age from last_used when known, else from creation — never skip
+        // never-used artifacts.
+        const lastActivity = art.last_used || art.created;
+        if (!lastActivity) continue;
+        if (Date.parse(lastActivity) < cutoff) {
+          toDelete.push({id, art});
+        }
       }
-    }
 
-    for (const {id, art} of toDelete) {
-      // Foreign guard: only remove live dirs we own.
-      if (art.kind === 'skill') {
-        const rmErr = removeSkillFile(id);
-        if (rmErr) continue;  // never delete a foreign dir
+      for (const {id, art} of toDelete) {
+        // Foreign guard: only remove live dirs we own.
+        if (art.kind === 'skill') {
+          const rmErr = removeSkillFile(id);
+          if (rmErr) continue;  // never delete a foreign dir
+        }
+        // Move the learning-store content to the graveyard for final rollback.
+        const srcDir = path.join(LEARNING_DIR, art.path);
+        if (fs.existsSync(srcDir)) {
+          const graveRel = path.join('graveyard', id, `deleted-${Date.now().toString(36)}`)
+            .split(path.sep).join('/');
+          moveDir(srcDir, path.join(LEARNING_DIR, graveRel));
+        }
+        delete idx.artifacts[id];
+        writeReceipt({
+          action: 'delete-unused',
+          id,
+          reason: `archived and unused for ${days}d`,
+          evidence: {last_used: art.last_used, use_count: art.use_count},
+        });
       }
-      // Move the learning-store content to the graveyard for final rollback.
-      const srcDir = path.join(LEARNING_DIR, art.path);
-      if (fs.existsSync(srcDir)) {
-        const graveRel = path.join('graveyard', id, `deleted-${Date.now().toString(36)}`)
-          .split(path.sep).join('/');
-        moveDir(srcDir, path.join(LEARNING_DIR, graveRel));
-      }
-      delete idx.artifacts[id];
-      writeReceipt({
-        action: 'delete-unused',
-        id,
-        reason: `archived and unused for ${days}d`,
-        evidence: {last_used: art.last_used, use_count: art.use_count},
-      });
-    }
 
-    if (toDelete.length > 0) {
-      saveIndex(idx);
-      cmd.ui.setStatus(buildStatus());
-    }
+      if (toDelete.length > 0) {
+        saveIndex(idx);
+        cmd.ui.setStatus(buildStatus());
+      }
+    });
   }
 
   // ── Prune: graveyard stale candidates and failed shadows ────────────────
   function applyPruning(): void {
     const ttlDays = numFlag('ll-candidate-ttl-days', 30, 1);
     const now = Date.now();
-    const idx = loadIndex();
-    const toPrune: {id: string; art: Artifact; reason: string}[] = [];
+    withLock('index', () => {
+      const idx = loadIndex();
+      const toPrune: {id: string; art: Artifact; reason: string}[] = [];
 
-    for (const [id, art] of Object.entries(idx.artifacts)) {
-      if (art.pinned) continue;
-      if (art.status === 'candidate' && art.shadow_runs === 0) {
-        const created = Date.parse(art.created);
-        if (Number.isFinite(created) && now - created > ttlDays * 86400000) {
-          toPrune.push({id, art, reason: 'stale'});
+      for (const [id, art] of Object.entries(idx.artifacts)) {
+        if (art.pinned) continue;
+        if (art.status === 'candidate' && art.shadow_runs === 0) {
+          const created = Date.parse(art.created);
+          if (Number.isFinite(created) && now - created > ttlDays * 86400000) {
+            toPrune.push({id, art, reason: 'stale'});
+          }
+        } else if (art.status === 'shadow' && art.red > art.green && art.red >= 3) {
+          toPrune.push({id, art, reason: 'failed shadow trials'});
         }
-      } else if (art.status === 'shadow' && art.red > art.green && art.red >= 3) {
-        toPrune.push({id, art, reason: 'failed shadow trials'});
       }
-    }
 
-    for (const {id, art, reason} of toPrune) {
-      const graveRel = path.join('graveyard', id, Date.now().toString(36))
-        .split(path.sep).join('/');
-      const srcDir = path.join(LEARNING_DIR, art.path);
-      if (fs.existsSync(srcDir)) {
-        moveDir(srcDir, path.join(LEARNING_DIR, graveRel));
+      for (const {id, art, reason} of toPrune) {
+        const graveRel = path.join('graveyard', id, Date.now().toString(36))
+          .split(path.sep).join('/');
+        const srcDir = path.join(LEARNING_DIR, art.path);
+        if (fs.existsSync(srcDir)) {
+          moveDir(srcDir, path.join(LEARNING_DIR, graveRel));
+        }
+        art.status = 'rejected';
+        art.rejection_reason = `pruned: ${reason}`;
+        art.path = graveRel;
+        writeReceipt({
+          action: `prune-${reason === 'stale' ? 'stale' : 'failed'}`,
+          id,
+          reason,
+          evidence: {created: art.created, shadow_runs: art.shadow_runs, green: art.green, red: art.red},
+        });
       }
-      art.status = 'rejected';
-      art.rejection_reason = `pruned: ${reason}`;
-      art.path = graveRel;
-      writeReceipt({
-        action: `prune-${reason === 'stale' ? 'stale' : 'failed'}`,
-        id,
-        reason,
-        evidence: {created: art.created, shadow_runs: art.shadow_runs, green: art.green, red: art.red},
-      });
-    }
 
     if (toPrune.length > 0) {
       saveIndex(idx);
       cmd.ui.setStatus(buildStatus());
     }
+    });
   }
 
   // ── Merge: consolidate overlapping learned skills ────────────────────────
@@ -1021,6 +1146,14 @@ export default function (cmd: ModApi): void {
   }
 
   function mergeArtifacts(keepId: string, absorbId: string, automatic: boolean): {ok: boolean; error?: string} {
+    // Locked: merge moves directories and rewrites the index — two parallel
+    // sessions merging at once would corrupt paths (index pointing at
+    // graveyarded dirs). Under contention, fail clean and let the caller retry.
+    const res = withLock('index', () => mergeArtifactsInner(keepId, absorbId, automatic));
+    return res ?? {ok: false, error: 'learning store is busy (another session is writing) — retry'};
+  }
+
+  function mergeArtifactsInner(keepId: string, absorbId: string, automatic: boolean): {ok: boolean; error?: string} {
     const idx = loadIndex();
     const keep = idx.artifacts[keepId];
     const absorb = idx.artifacts[absorbId];
@@ -1759,6 +1892,17 @@ export default function (cmd: ModApi): void {
     id: string,
     opts: {autonomous?: boolean; cycleId?: string} = {},
   ): {ok: boolean; message: string} {
+    // Locked: promotion moves candidate dirs into active/ AND rewrites the
+    // index — an interleaving session could observe (or create) a path the
+    // index no longer owns.
+    const res = withLock('index', () => promoteArtifactInner(id, opts));
+    return res ?? {ok: false, message: 'Learning store is busy (another session is writing) — retry.'};
+  }
+
+  function promoteArtifactInner(
+    id: string,
+    opts: {autonomous?: boolean; cycleId?: string},
+  ): {ok: boolean; message: string} {
     const idx = loadIndex();
     const art = idx.artifacts[id];
     if (!art) return {ok: false, message: `Artifact "${id}" not found.`};
@@ -2160,6 +2304,14 @@ export default function (cmd: ModApi): void {
 
   // ── Execute a staged learning_manage input (replay path for approval) ────
   function executeManage(input: unknown): Record<string, unknown> {
+    // Locked: every write action mutates the index and/or artifact files —
+    // the whole action runs inside the lock so parallel sessions can't
+    // interleave their read-modify-write cycles.
+    const res = withLock('index', () => executeManageInner(input));
+    return res ?? {ok: false, error: 'Learning store is busy (another session is writing) — retry.'};
+  }
+
+  function executeManageInner(input: unknown): Record<string, unknown> {
     const inp = (typeof input === 'object' && input !== null ? input : {}) as Record<string, unknown>;
     const action = String(inp.action ?? '');
     const kind = String(inp.kind ?? 'skill');

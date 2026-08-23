@@ -6,6 +6,26 @@ updated with every merged change.
 
 ## [Unreleased]
 
+### Parallel-session safety
+
+- **learn-loop** — every store write (index, episodes, skill-dir moves,
+  decay/prune/delete sweeps, promote, merge, learning_manage) now runs
+  under a cross-process file lock (mutually-exclusive mkdir, reentrant,
+  stale-steal after 10s). Two parallel sessions can no longer interleave
+  read-modify-write cycles on `index.json` and lose artifacts.
+- **memory-bank** — L1 prepend+compact, L2 add/update/remove, lesson
+  graduation sweep, ledger appends/tombstones, and recall-stats all
+  serialized with the same lock protocol.
+- **self-repair** — checkpoint save AND the load's copy/rename/unlink
+  dance are serialized; two sessions can no longer race the backup file.
+- **autopilot** / **cache-tracker** — receipt and stats JSONL appends
+  serialized per file so parallel sessions can't interleave lines.
+- **command-center** — plan filenames now carry a millisecond-unique
+  component, so two sessions briefing the same objective write distinct
+  artifacts instead of clobbering each other.
+- Lock protocol verified by a two-process stress test (60/60 increments
+  with zero lost updates).
+
 ### Repo
 
 - **README rewritten as a portfolio piece** — pitch, mermaid pipeline

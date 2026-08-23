@@ -310,6 +310,21 @@ export default function (cmd: ModApi): void {
     taskDurations?: Record<string, number>;
     status?: string;
   } | null {
+    // Locked: load consumes the checkpoint (copy to backup + unlink) — the
+    // same protocol the save path touches, so they must be serialized.
+    const res = withCheckpointLock(() => loadCheckpointInner());
+    return res ?? null;
+  }
+
+  function loadCheckpointInner(): {
+    filesTouched: string[];
+    lastTopic: string;
+    lastIntent?: string;
+    nextAction?: string;
+    midEditFile?: string;
+    taskDurations?: Record<string, number>;
+    status?: string;
+  } | null {
     for (const p of [checkpointPath, backupPath]) {
       try {
         if (!fs.existsSync(p)) continue;
@@ -338,36 +353,122 @@ export default function (cmd: ModApi): void {
     return null;
   }
 
+  // ── Cross-process checkpoint lock ─────────────────────────────────────────
+  // Parallel sessions in the same project share checkpoint.json; the save
+  // protocol (tmp write, rename, backup unlink) must be serialized.
+  const CP_LOCK_KEYS = new Map<string, {depth: number}>();
+  const CP_LOCK_WAIT_MS = 10000;
+  const CP_LOCK_RETRY_MS = 40;
+  const cpLockPath = path.join(checkpointDir, '.checkpoint.lock');
+
+  function cpIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  function cpSleep(ms: number): void {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* spin */ }
+  }
+
+  function withCheckpointLock<T>(fn: () => T): T | null {
+    const existing = CP_LOCK_KEYS.get('checkpoint');
+    if (existing) {
+      existing.depth += 1;
+      try {
+        return fn();
+      } finally {
+        existing.depth -= 1;
+        if (existing.depth <= 0) CP_LOCK_KEYS.delete('checkpoint');
+      }
+    }
+    try { fs.mkdirSync(checkpointDir, {recursive: true}); } catch { /* ok */ }
+    const tmp = cpLockPath + '.tmp-' + process.pid;
+    const started = Date.now();
+    while (true) {
+      try {
+        fs.mkdirSync(tmp, {recursive: false});
+        try {
+          fs.renameSync(tmp, cpLockPath);
+        } catch {
+          fs.rmSync(tmp, {recursive: true, force: true});
+          if (Date.now() - started > CP_LOCK_WAIT_MS) {
+            let holder = '?';
+            try {
+              holder = fs.readFileSync(path.join(cpLockPath, 'owner.json'), 'utf-8').trim();
+            } catch { /* no metadata */ }
+            if (/^\d+$/.test(holder) && !cpIsAlive(Number(holder))) {
+              fs.rmSync(cpLockPath, {recursive: true, force: true});
+              continue;
+            }
+            return null;
+          }
+          cpSleep(CP_LOCK_RETRY_MS);
+          continue;
+        }
+      } catch {
+        if (Date.now() - started > CP_LOCK_WAIT_MS) return null;
+        cpSleep(CP_LOCK_RETRY_MS);
+        continue;
+      }
+      try {
+        fs.writeFileSync(path.join(cpLockPath, 'owner.json'),
+          JSON.stringify({pid: process.pid, ts: new Date().toISOString()}));
+      } catch { /* held regardless */ }
+      const handle = {depth: 1};
+      CP_LOCK_KEYS.set('checkpoint', handle);
+      try {
+        return fn();
+      } finally {
+        handle.depth -= 1;
+        if (handle.depth <= 0) {
+          CP_LOCK_KEYS.delete('checkpoint');
+          try { fs.rmSync(cpLockPath, {recursive: true, force: true}); } catch { /* stale later */ }
+        }
+      }
+    }
+  }
+
   function saveCheckpoint(partial: boolean = false, status: 'active' | 'interrupted' | 'completed' = 'active') {
     if (!checkpointsEnabled()) return;
-    try {
-      if (!fs.existsSync(checkpointDir)) fs.mkdirSync(checkpointDir, { recursive: true });
-      const checkpoint = {
-        lastSession: new Date().toISOString(),
-        partial: partial || undefined,
-        status: status,
-        filesTouched: Array.from(filesTouched).slice(-30),
-        lastTopic: currentTaskLabel || '',
-        lastIntent: lastIntent || undefined,
-        nextAction: nextAction || undefined,
-        midEditFile: midEditFile || undefined,
-        taskDurations: Object.keys(taskDurations).length > 0 ? taskDurations : undefined,
-      };
-      const tmp = checkpointPath + '.tmp-' + Date.now();
-      fs.writeFileSync(tmp, JSON.stringify(checkpoint, null, 2));
-      try { fs.renameSync(tmp, checkpointPath); } catch {
-        try { fs.unlinkSync(tmp); } catch { /* ok */ }
-        fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
-      }
-      if (fs.existsSync(backupPath)) {
-        try {
-          if (fs.existsSync(checkpointPath) && fs.statSync(checkpointPath).size > 10) {
-            fs.unlinkSync(backupPath);
-          }
-        } catch { /* ok */ }
-      }
-      snapshotTurnsSinceLastSave = 0;
-    } catch { /* never crash */ }
+    // Locked: save touches checkpoint + backup in a small protocol — two
+    // parallel sessions saving at once would interleave and could unlink a
+    // just-written backup. Best-effort under contention (skip the snapshot).
+    const res = withCheckpointLock(() => {
+      try {
+        if (!fs.existsSync(checkpointDir)) fs.mkdirSync(checkpointDir, { recursive: true });
+        const checkpoint = {
+          lastSession: new Date().toISOString(),
+          partial: partial || undefined,
+          status: status,
+          filesTouched: Array.from(filesTouched).slice(-30),
+          lastTopic: currentTaskLabel || '',
+          lastIntent: lastIntent || undefined,
+          nextAction: nextAction || undefined,
+          midEditFile: midEditFile || undefined,
+          taskDurations: Object.keys(taskDurations).length > 0 ? taskDurations : undefined,
+        };
+        const tmp = checkpointPath + '.tmp-' + Date.now();
+        fs.writeFileSync(tmp, JSON.stringify(checkpoint, null, 2));
+        try { fs.renameSync(tmp, checkpointPath); } catch {
+          try { fs.unlinkSync(tmp); } catch { /* ok */ }
+          fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+        }
+        if (fs.existsSync(backupPath)) {
+          try {
+            if (fs.existsSync(checkpointPath) && fs.statSync(checkpointPath).size > 10) {
+              fs.unlinkSync(backupPath);
+            }
+          } catch { /* ok */ }
+        }
+        snapshotTurnsSinceLastSave = 0;
+      } catch { /* never crash */ }
+    });
+    void res;
   }
 
   // ── Hooks: checkpoint load + git state (one-shot) ────────────────────────

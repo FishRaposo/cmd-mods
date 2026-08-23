@@ -330,9 +330,34 @@ export default function (cmd: ModApi): void {
   }
 
   function writeReceipt(r: Receipt): void {
+    // Parallel sessions share the receipt ledger; serialize the append.
     try {
       if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, {recursive: true});
-      fs.appendFileSync(receiptsPath, JSON.stringify(r) + '\n');
+      const lock = receiptsPath + '.lock';
+      const tmp = lock + '.tmp-' + process.pid;
+      const started = Date.now();
+      while (true) {
+        try {
+          fs.mkdirSync(tmp, {recursive: false});
+          try {
+            fs.renameSync(tmp, lock);
+          } catch {
+            fs.rmSync(tmp, {recursive: true, force: true});
+            if (Date.now() - started > 10000) return;
+            const until = Date.now() + 40;
+            while (Date.now() < until) { /* spin */ }
+            continue;
+          }
+        } catch {
+          return;
+        }
+        try {
+          fs.appendFileSync(receiptsPath, JSON.stringify(r) + '\n');
+        } finally {
+          try { fs.rmSync(lock, {recursive: true, force: true}); } catch { /* stale later */ }
+        }
+        return;
+      }
     } catch { /* receipts are best-effort */ }
   }
 

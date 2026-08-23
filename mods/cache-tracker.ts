@@ -66,9 +66,36 @@ export default function (cmd: ModApi): void {
   }
 
   function appendLine(entry: Record<string, unknown>): void {
+    // Parallel sessions append to the same JSONL; each line is one write,
+    // but two writers racing the same append can interleave bytes on some
+    // filesystems. Serialize via a lock dir next to the file.
     try {
       fs.mkdirSync(path.dirname(STATS_PATH), {recursive: true});
-      fs.appendFileSync(STATS_PATH, JSON.stringify(entry) + '\n');
+      const lock = STATS_PATH + '.lock';
+      const tmp = lock + '.tmp-' + process.pid;
+      const started = Date.now();
+      while (true) {
+        try {
+          fs.mkdirSync(tmp, {recursive: false});
+          try {
+            fs.renameSync(tmp, lock);
+          } catch {
+            fs.rmSync(tmp, {recursive: true, force: true});
+            if (Date.now() - started > 10000) return; // best-effort, skip
+            const until = Date.now() + 40;
+            while (Date.now() < until) { /* spin */ }
+            continue;
+          }
+        } catch {
+          return;
+        }
+        try {
+          fs.appendFileSync(STATS_PATH, JSON.stringify(entry) + '\n');
+        } finally {
+          try { fs.rmSync(lock, {recursive: true, force: true}); } catch { /* stale later */ }
+        }
+        return;
+      }
     } catch { /* stats are best-effort */ }
   }
 
