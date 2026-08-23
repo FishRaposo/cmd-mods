@@ -1,11 +1,28 @@
 {
   "name": "cmd-mods",
   "version": "1.1.0",
-  "description": "A composable suite of Command Code mods — command-center, quality-guards, self-repair, autopilot, memory-bank, and learn-loop.",
+  "description": "A composable suite of Command Code mods — a self-verifying, self-improving agent pipeline: command-center, quality-guards, self-repair, autopilot, memory-bank, learn-loop, cache-tracker.",
+  "keywords": [
+    "command-code",
+    "agent",
+    "mods",
+    "self-repair",
+    "verification",
+    "autonomy",
+    "memory",
+    "learning"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FishRaposo/cmd-mods.git"
+  },
+  "homepage": "https://github.com/FishRaposo/cmd-mods#readme",
+  "license": "MIT",
   "files": [
     "mods",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "CONTRIBUTING.md"
   ],
   "commandcode": {
     "mods": ["./mods/*.ts"]

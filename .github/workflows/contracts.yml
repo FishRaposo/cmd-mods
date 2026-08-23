@@ -1,0 +1,17 @@
+name: contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contract-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Cross-mod contract check
+        run: node scripts/check-contracts.mjs

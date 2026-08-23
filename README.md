@@ -1,157 +1,155 @@
 # cmd-mods
 
-A monorepo of [Command Code](https://commandcode.ai) mods — the self-improving
-learning loop, structured planning, persistence, and more. One repo, many mods.
+A composable suite of agent mods that turn Command Code into a self-verifying,
+self-improving engineering system.
 
-## Mods
+![contract check](https://github.com/FishRaposo/cmd-mods/actions/workflows/contracts.yml/badge.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-| Mod | Description |
-|---|---|
-| `command-center` | Structured plan briefing → compilation → review state machine. |
-| `quality-guards` | Behavioral guardrails: failure coaching, loop detection, overwrite/git guards, build guard, budgets. |
-| `self-repair` | The completion judge: self-review gate, verdict emission, checkpoints, crash recovery, task continuity. |
-| `autopilot` | Verified-momentum engine: after self-repair proves the task done, spends a small, bounded trust budget on safe local follow-ups (green executes, yellow/red propose). |
-| `memory-bank` | Durable, gated project memory: `.agents/memory/` store (L1 events / L2 registry / L3 lessons), verified-episode feed, recall, graduation into `.agents/skills/`. |
-| `learn-loop` | Autonomous skills manager. Seeds candidates from user corrections, runs its own distillation turn, trials candidates as shadows, and auto-promotes them on verified self-repair verdicts — with a receipt for every move. |
-| `cache-tracker` | Prompt-cache hit-rate observability: live footer status, `/cache` history, per-session JSONL in `~/.commandcode/cache-tracker.jsonl`. Pure observer — registers no prompt hooks. |
+## Why this exists
+
+LLM agents are great at generating code and mediocre at knowing when they're
+done. This suite gives an agent **slots for the abilities a careful engineer
+exercises deliberately**:
+
+- **Intent** — plan before building, with decisions made explicitly.
+- **Safety** — catch failure loops, destructive commands, and scope drift.
+- **Truth** — a completion *judge* that is not the worker itself.
+- **Follow-through** — bounded, verified initiative after the judge signs off.
+- **Memory** — durable project facts, gated so they can't rot.
+- **Learning** — the agent's workflow patterns, distilled into loadable skills.
+- **Observability** — measured, not assumed: real prompt-cache hit rates.
+
+The architectural bet: **separation of concerns between agentic components**.
+The worker (the model) never marks its own work done. The judge (self-repair)
+never executes. The momentum engine (autopilot) never verifies. They
+communicate through a small, versioned event contract — the mods are the
+system, the events are the API.
 
 ## The pipeline
 
-These mods compose into one workflow — each owns one job, and each is
-useless without the previous one:
-
-```text
-command-center  = intent         (plan / milestones / non-goals)
-quality-guards  = safety         (advisory mid-work warnings — never blocks)
-self-repair     = truth          (the ONLY completion judge; sole verdict emitter)
-autopilot       = follow-through (the ONLY final-verdict consumer; never marks own work done)
-memory-bank     = memory         (durable project facts — gated, verified feed)
-learn-loop      = learning       (autonomous skills manager — seeds, trials, promotes)
+```mermaid
+flowchart LR
+    CC[command-center<br/>intent] --> QG[quality-guards<br/>safety]
+    QG --> SR[<b>self-repair</b><br/>truth: the only judge]
+    SR -->|final verdict| AP[autopilot<br/>follow-through]
+    AP -->|request-cycle| SR
+    MB[memory-bank<br/>memory] -.->|recall leads| CC
+    LL[learn-loop<br/>learning] -.->|skills| CC
+    SR -->|verified episodes| MB
+    MB -->|graduate| LL
+    CT[cache-tracker<br/>observability] -.->|watches| SR
 ```
 
-The core invariant: **self-repair is the only completion judge. Autopilot
-only gets initiative after the referee raises the hand.** A verified
-completion emits a `self-repair/verdict` event; a mandate grants momentum;
-each autopilot action opens a fresh child verification cycle before anything
-else may happen.
+The core invariant: **self-repair is the only completion judge.** Autopilot
+only gains initiative after a verified completion verdict — and every
+autopilot action opens a fresh child verification cycle before anything else
+may happen. No referee judgment, no initiative.
 
-### Cross-mod contract
+## Mods
 
-All channels ride `cmd.events` (synchronous, in-process):
+| Mod | What it does | Key capabilities |
+|---|---|---|
+| [`command-center`](mods/command-center.ts) | Structured planning: decision funnel → plan artifact → review | Multi-round briefing state machine, plan compilation, review mode with write-blocks, per-state system prompts (cache-stable) |
+| [`quality-guards`](mods/quality-guards.ts) | Advisory safety warnings — never blocks | Failure coaching (escalating), loop detection, overwrite guard, destructive-git warning, build guard, test/token budgets, drift detection, run-length estimation |
+| [`self-repair`](mods/self-repair.ts) | The completion judge — the only verdict emitter | Self-review gate before "done", evidence collection (inspection commands can't fake it), crash checkpoints, interruption resume, task continuity |
+| [`autopilot`](mods/autopilot.ts) | Verified-momentum engine | Tiered follow-ups (green executes / yellow proposes / red never), budget-capped initiative, synchronous referee handshake, scope + forbidden-pattern enforcement, receipt ledger |
+| [`memory-bank`](mods/memory-bank.ts) | Durable, gated project memory | L1 events / L2 pointer registry / L3 lessons, recall injection, write-bar (only verified completions + explicit writes), auto-graduation into skills |
+| [`learn-loop`](mods/learn-loop.ts) | Autonomous skill lifecycle manager | Seeds candidates from user corrections, self-distillation turns, shadow trials with green/red stats, promotion on verified verdicts, merge review, decay/archive — receipts for every move |
+| [`cache-tracker`](mods/cache-tracker.ts) | Prompt-cache observability | Live hit-rate footer, per-run JSONL ledger, `/cache` history — registers no prompt hooks, so it can't perturb what it measures |
 
-```text
-self-repair/verdict         self-repair → autopilot
-  {version: 2, cycleId, complete, final, missing?, evidence[], files[], at}
+## Design principles
 
-self-repair/request-cycle   autopilot → self-repair  (open a child cycle)
-  {cycleId, actionId, verify[]}
+- **Pipeline of single-responsibility modules.** Each mod owns one job and is
+  useless without the previous one. No shared code between mods — the event
+  schema is the contract, and every mod is standalone-installable.
+- **Receipts, not confidence.** Every autonomous action leaves a verifiable
+  audit trail: what ran, why it belonged, how it was verified, how to undo it.
+- **Tiered, budget-capped autonomy.** The gate on an autonomous action scales
+  with its cost — cheap actions may fire on weak signals, expensive or
+  irreversible actions require verified evidence, and loops are hard-capped.
+- **Measurement that doesn't perturb the measured.** The cache tracker
+  registers no prompt hooks; the system prompt stays byte-stable across
+  turns so provider prefix-caching keeps its hits.
+- **Ownership boundaries, mechanically enforced.** learn-loop only manages
+  skills it installed itself (a `.managed.json` marker), and refuses to touch
+  user-installed artifacts.
 
-self-repair/cycle-accepted  self-repair → autopilot  (synchronous ack —
-                            autopilot refuses to continue without it)
+## Engineering discipline
 
-self-repair/ping / pong     autopilot ⇄ self-repair (referee presence probe
-                            at first run_start; no pong → momentum disabled)
-```
+This repo is the artifact of its own mods — the review loop, the memory
+bank, and the learning loop all ran against it.
 
-Design rules:
-
-- Verdicts **never survive across runs** — autopilot clears pending state in
-  `onRunEnd` and only accepts verdicts timestamped after the current
-  `run_start`.
-- With `sr-self-review` off, no verdict is ever emitted → autopilot stays
-  muted. No referee judgment, no initiative.
-- The harness caps 8 consecutive stop-hook continuations per run; each green
-  action costs ~2 (its self-review pass + the action turn). Default
-  `auto-max-green-chain = 3` keeps momentum safely under the cap.
-- Duplicated regex tables across mods are intentional: each mod must be
-  standalone-installable. The contract is the event schema, not shared code.
-
-Receipts land in `.commandcode/autopilot/receipts.jsonl`; autonomous
-learn-loop moves land in `.agents/learning/autonomy.jsonl`. Learn-loop's
-lifecycle — seed (3+ corrections) → distill (`onStop` turn, budgeted) →
-shadow (recall + verify stats) → promote (only on final self-repair verdicts)
-→ refine (patches from sessions that used a skill and hit failures) →
-merge (overlapping actives proposed at stop time; the agent reads both skills
-and decides merge / dismiss / ask — the similarity score only pre-filters) →
-archive/delete (unused
-skills decay out of `.agents/skills/`, then purge after the deletion window)
-— is fully toggleable via the `ll-*` flags. Promotion requires a real
-`self-repair/verdict`; without the referee installed, learn-loop still seeds
-and distills but never promotes.
-
-Learn-loop **only manages skills it installed itself**: every install writes
-`.agents/skills/<id>/.managed.json`, and every touch (sync, merge, demote,
-archive, delete) verifies that marker first. User-installed skills are
-visible in `/learn status` but never modified, merged into, or deleted.
+- **Mechanical contract checking** — `node scripts/check-contracts.mjs`
+  validates cross-mod event pairing, command/tool/renderer uniqueness,
+  per-mod flag prefixes, and exec timeouts. Runs in CI on every push.
+- **Per-mod changelog** — every behavior change updates `CHANGELOG.md` in the
+  same commit, organized by mod.
+- **Postmortems are documentation** — AGENTS.md records the wire-contract
+  crash postmortem (string-content messages) and the cache rules it taught us.
+- **Personal data never enters history** — `.gitignore` keeps runtime state
+  (memory stores, receipts, cache stats) out of the public repo.
 
 ## Measured prompt-cache performance
 
-The `cache-tracker` mod measures the suite's own cache hit rate
+`cache-tracker` measures the suite's own cache hit rate
 (`cacheRead / (input + cacheRead + cacheWrite)` — the provider's disjoint
-token buckets). Real numbers from the repo's own sessions on DeepSeek V4
-(flash and pro):
+token buckets). Real numbers from this repo's own sessions on DeepSeek V4:
 
 | Session | Requests | Input | Cache read | Hit rate |
 |---|---|---|---|---|
 | Interactive review (25 turns) | 25 | 6,649,218 | 6,317,312 | **48.7%** |
 | One-shot headless runs (median) | 1 | ~21.4K | ~5.4K | 10.7–29.8% |
 
-Why the numbers look like this: one-shot headless runs are a cold-start
-worst case — the system prompt must be re-processed once per run. The
-interactive session shows the cache discipline paying off across turns:
-the stable system prompt prefix stays cached turn after turn, so ~49% of
-input tokens were cache reads. The hit rate is provider- and session-
-dependent; `/cache` shows your own live numbers.
+One-shot runs are the cold-start worst case — the system prompt re-processes
+once per run. The interactive session shows the cache discipline paying off:
+the stable system prompt prefix stays cached turn after turn. Hit rates are
+provider- and session-dependent; `/cache` shows your own live numbers.
 
-## Install a single mod
+## Install
 
-Install the suite, then keep only the mods you want via the object form of
-`mods.sources` in your Command Code settings (`~/.commandcode/settings.json`
-for user scope):
+Install the full suite:
 
 ```bash
-commandcode mods add -g your-username/cmd-mods
+commandcode mods add -g FishRaposo/cmd-mods
+commandcode mods list    # verify: seven mods, zero load warnings
 ```
+
+Install a single mod by keeping only what you want via the object form of
+`mods.sources` in `~/.commandcode/settings.json`:
 
 ```json
 {
   "mods": {
     "sources": [
-      {"source": "your-username/cmd-mods", "mods": ["learn-loop.ts"]}
+      {"source": "FishRaposo/cmd-mods", "mods": ["learn-loop.ts"]}
     ]
   }
 }
 ```
 
-## Install the full suite
+Drop `-g` for project scope. On Windows the binary is `commandcode` (alias
+`command-code`); docs elsewhere shorten it to `cmd`.
 
-```bash
-commandcode mods add -g your-username/cmd-mods
-commandcode mods list    # verify: six mods, zero load warnings
-```
-
-Drop `-g` to install project-scoped instead of user-scoped. On Windows the
-binary is `commandcode` (alias `command-code`); docs elsewhere shorten it
-to `cmd`.
-
-## Project structure
+## Repository layout
 
 ```
 cmd-mods/
-├── mods/                    # All mod files (one .ts per mod)
-│   ├── command-center.ts
-│   ├── quality-guards.ts
-│   ├── self-repair.ts
-│   ├── autopilot.ts
-│   ├── memory-bank.ts
-│   └── learn-loop.ts
+├── mods/                    # One TypeScript file per mod, standalone-installable
 ├── scripts/
-│   └── check-contracts.mjs  # Mechanical cross-mod contract check (node scripts/check-contracts.mjs)
-├── package.json             # Manifest — declares mods via glob
+│   └── check-contracts.mjs  # Mechanical cross-mod contract check (runs in CI)
+├── package.json             # Manifest — declares mods via glob, files whitelist
 ├── CHANGELOG.md             # Per-mod change history
-├── AGENTS.md                # Agent guidance (changelog discipline, cache rules)
-└── README.md
+├── AGENTS.md                # Maintenance disciplines + crash postmortems
+├── .github/workflows/       # CI
+└── LICENSE                  # MIT
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: one behavior
+change = one conventional commit + a CHANGELOG entry in the same commit,
+and `node scripts/check-contracts.mjs` must pass.
 
 ## License
 

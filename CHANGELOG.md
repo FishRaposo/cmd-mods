@@ -6,6 +6,18 @@ updated with every merged change.
 
 ## [Unreleased]
 
+### Repo
+
+- **README rewritten as a portfolio piece** — pitch, mermaid pipeline
+  diagram, per-mod capability tables, design principles, engineering
+  discipline, measured cache performance.
+- **CI** — GitHub Actions `contracts` workflow runs the cross-mod contract
+  check on every push and pull request.
+- **CONTRIBUTING.md** — commit style, architecture rules, verification
+  gates, and what makes a good mod change.
+- **package.json** — keywords, repository/homepage metadata, CONTRIBUTING.md
+  in the files whitelist.
+
 ### Fixes
 
 - **command-center, quality-guards, learn-loop, memory-bank** — injected
