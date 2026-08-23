@@ -51,10 +51,16 @@ const VERIFY_COMMANDS = [
   /\b(pytest|vitest|jest|mocha|ava|playwright|cypress|tsc|eslint)\b/,
 ];
 
+// Inspection commands merely MENTION test runners ("cat jest.config.js");
+// their green exit proves nothing. Never count them as evidence.
+const INSPECTION_COMMANDS = /^(?:sudo\s+)?(?:cat|type|head|tail|less|more|grep|rg|findstr|ls|dir|Get-Content|Select-String|echo|Write-Output)\b/i;
+
 const FAILURE_SIGNALS = /\b(failed|error|broken|fail(?:ed|ures?)|exit\s+code\s*:?\s*[1-9])\b/i;
 
 function isVerifyCommand(cmd: string): boolean {
-  return cmd.length > 0 && VERIFY_COMMANDS.some(p => p.test(cmd));
+  if (cmd.length === 0) return false;
+  if (INSPECTION_COMMANDS.test(cmd)) return false;
+  return VERIFY_COMMANDS.some(p => p.test(cmd));
 }
 
 function extractCmd(input: unknown): string {
@@ -151,17 +157,6 @@ function extractTaskLabel(text: string): string | null {
   return match ? match[0].trim() : null;
 }
 
-function taskSimilarity(a: string, b: string): number {
-  const wordsA = new Set(a.toLowerCase().split(/\s+/));
-  const wordsB = new Set(b.toLowerCase().split(/\s+/));
-  if (wordsA.size === 0 || wordsB.size === 0) return 0;
-  let overlap = 0;
-  for (const w of wordsA) {
-    if (wordsB.has(w)) overlap++;
-  }
-  return overlap / Math.max(wordsA.size, wordsB.size);
-}
-
 // ── Mod ─────────────────────────────────────────────────────────────────────
 
 export default function (cmd: ModApi): void {
@@ -190,18 +185,19 @@ export default function (cmd: ModApi): void {
     if (typeof v === 'string') return v !== 'false';
     return fallback;
   }
-  function numFlag(name: string, fallback: number): number {
+  function numFlag(name: string, fallback: number, min: number = 0): number {
     const v = cmd.getFlag(name);
     const n = typeof v === 'number' ? v : parseInt(String(v), 10);
-    return Number.isFinite(n) ? n : fallback;
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return n;
   }
   function checkpointsEnabled(): boolean { return boolFlag('sr-checkpoints', true); }
   function gitStateEnabled(): boolean { return boolFlag('sr-git-state', false); }
   function continuityEnabled(): boolean { return boolFlag('sr-task-continuity', true); }
   function selfReviewEnabled(): boolean { return boolFlag('sr-self-review', true); }
   function resumeEnabled(): boolean { return boolFlag('sr-resume', true); }
-  function maxResumes(): number { return numFlag('sr-max-resumes', 3); }
-  function snapshotInterval(): number { return numFlag('sr-snapshot-interval', 5); }
+  function maxResumes(): number { return numFlag('sr-max-resumes', 3, 0); }
+  function snapshotInterval(): number { return numFlag('sr-snapshot-interval', 5, 1); }
 
   // ── State ────────────────────────────────────────────────────────────────
   const filesTouched = new Set<string>();
@@ -603,13 +599,13 @@ export default function (cmd: ModApi): void {
 
       if (isClosing && mentionsWork && !stillActive && selfReviewEnabled() && !selfReviewTriggered && (filesModified.size > 0 || cycleFromAutopilot)) {
         selfReviewTriggered = true;
-        ensureCycle();
+        const cycleId = ensureCycle();
         if (continuityEnabled() && currentTaskLabel && topicTurns >= 3) {
           taskDurations[currentTaskLabel] = topicTurns;
         }
         finalCheckpointStatus = 'interrupted';
         emitVerdict({
-          cycleId: ensureCycle(),
+          cycleId,
           complete: false,
           final: false,
           missing: ['self-review pass not yet completed'],
