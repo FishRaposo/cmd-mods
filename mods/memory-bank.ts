@@ -376,6 +376,50 @@ export default function (cmd: ModApi): void {
     return null;
   }
 
+  // L2 rows are pointers — the store contract requires update/remove when a
+  // pointer changes or the entity retires. Match by the row's first cell
+  // (Name / ID per table). Returns null on success, error string otherwise.
+  function findL2Row(section: string, firstCell: string): number {
+    const raw = readL2();
+    const lines = raw.split(/\r?\n/);
+    const secIdx = lines.findIndex(l => l.trim() === section);
+    if (secIdx < 0) return -1;
+    let rowIdx = secIdx + 1;
+    while (rowIdx < lines.length) {
+      const line = lines[rowIdx];
+      if (line.trim() === '') break;
+      // Stop at the next section heading (## ...).
+      if (line.trim().startsWith('## ') && rowIdx > secIdx) return -1;
+      if (line.startsWith('|') && !line.includes('---')) {
+        const first = line.split('|').map(s => s.trim()).filter(Boolean)[0] ?? '';
+        if (first === firstCell) return rowIdx;
+      }
+      rowIdx++;
+    }
+    return -1;
+  }
+
+  function updateL2Row(section: string, firstCell: string, cells: string[]): string | null {
+    if (!L2_SECTIONS.includes(section)) return `Unknown section: ${section}`;
+    if (cells.length === 0 || cells.some(c => c.includes('|'))) return 'Cells must not contain pipes';
+    const lines = readL2().split(/\r?\n/);
+    const rowIdx = findL2Row(section, firstCell);
+    if (rowIdx < 0) return `No row with first cell "${firstCell}" in ${section}`;
+    lines[rowIdx] = '| ' + cells.join(' | ') + ' |';
+    fs.writeFileSync(l2Path, lines.join('\n'));
+    return null;
+  }
+
+  function removeL2Row(section: string, firstCell: string): string | null {
+    if (!L2_SECTIONS.includes(section)) return `Unknown section: ${section}`;
+    const lines = readL2().split(/\r?\n/);
+    const rowIdx = findL2Row(section, firstCell);
+    if (rowIdx < 0) return `No row with first cell "${firstCell}" in ${section}`;
+    lines.splice(rowIdx, 1);
+    fs.writeFileSync(l2Path, lines.join('\n'));
+    return null;
+  }
+
   // ── L3 helpers ──────────────────────────────────────────────────────────
   function listLessons(): LessonMeta[] {
     try {
@@ -424,6 +468,7 @@ export default function (cmd: ModApi): void {
   interface RecallStats {
     counts: Record<string, number>;
     graduated: string[];
+    lastUse: Record<string, number>;
   }
 
   function loadRecallStats(): RecallStats {
@@ -434,11 +479,12 @@ export default function (cmd: ModApi): void {
           return {
             counts: parsed.counts && typeof parsed.counts === 'object' ? parsed.counts : {},
             graduated: Array.isArray(parsed.graduated) ? parsed.graduated : [],
+            lastUse: parsed.lastUse && typeof parsed.lastUse === 'object' ? parsed.lastUse : {},
           };
         }
       }
     } catch { /* start fresh */ }
-    return {counts: {}, graduated: []};
+    return {counts: {}, graduated: [], lastUse: {}};
   }
 
   function saveRecallStats(stats: RecallStats): void {
@@ -448,9 +494,12 @@ export default function (cmd: ModApi): void {
     } catch { /* best-effort */ }
   }
 
-  function bumpRecallCount(title: string): void {
+  function recordRecallUse(title: string, isLesson: boolean): void {
     const stats = loadRecallStats();
-    stats.counts[title] = (stats.counts[title] ?? 0) + 1;
+    stats.lastUse[title] = Date.now();
+    if (isLesson) {
+      stats.counts[title] = (stats.counts[title] ?? 0) + 1;
+    }
     saveRecallStats(stats);
   }
 
@@ -553,7 +602,9 @@ export default function (cmd: ModApi): void {
     matches.sort((a, b) => b.score - a.score);
     for (const m of matches.slice(0, limit)) {
       lastUse[m.title] = Date.now();
-      if (m.layer === 'L3') bumpRecallCount(m.title);
+      // Persist lastUse (all layers) and counts (L3 lessons) so /bank
+      // maintain has real decay data across sessions.
+      recordRecallUse(m.title, m.layer === 'L3');
     }
     maybeAutoGraduate();
     return matches.slice(0, limit);
@@ -590,7 +641,18 @@ export default function (cmd: ModApi): void {
         const m = messages[i];
         if (m && typeof m === 'object' && (m as Record<string, unknown>).role === 'user') {
           const content = (m as Record<string, unknown>).content;
+          // Wire-contract shape is ARRAY content blocks — string support is
+          // legacy tolerance. Without the array branch, recall never fires
+          // (every message on the wire is array content).
           if (typeof content === 'string') { lastUser = content; break; }
+          if (Array.isArray(content)) {
+            const textParts = content
+              .filter((p: unknown) => typeof p === 'object' && p !== null &&
+                (p as Record<string, unknown>).type === 'text')
+              .map((p: unknown) => String((p as Record<string, unknown>).text || ''));
+            lastUser = textParts.join(' ');
+            if (lastUser) break;
+          }
         }
       }
       if (lastUser.length < 8) return messages;
@@ -684,6 +746,7 @@ export default function (cmd: ModApi): void {
           why: {type: 'string', description: 'Lesson Why section (L3).'},
           section: {type: 'string', description: 'L2 section name (registry, required).'},
           cells: {type: 'array', items: {type: 'string'}, description: 'L2 table row cells (registry, required).'},
+          action: {type: 'string', enum: ['add', 'update', 'remove'], description: 'Registry row action (default add). update/remove match by cells[0] (Name/ID).'},
         },
         required: ['kind'],
       },
@@ -703,9 +766,31 @@ export default function (cmd: ModApi): void {
       if (kind === 'registry') {
         const section = String(input.section ?? '');
         const cells = Array.isArray(input.cells) ? input.cells.map(String) : [];
-        const err = addL2Row(section, cells);
-        if (err) return {ok: false, error: err};
-        return {ok: true, content: [{type: 'text', text: `L2 row added to ${section}.`}]};
+        const action = String(input.action ?? 'add');
+        if (!L2_SECTIONS.includes(section)) {
+          return {ok: false, error: `Unknown section: ${section}`};
+        }
+        if (action === 'add') {
+          const err = addL2Row(section, cells);
+          if (err) return {ok: false, error: err};
+          return {ok: true, content: [{type: 'text', text: `L2 row added to ${section}.`}]};
+        }
+        // update/remove match the row by its first cell (Name / ID per table)
+        const firstCell = cells[0] ?? '';
+        if (!firstCell) {
+          return {ok: false, error: `registry ${action} requires cells[0] as the row's first-cell key`};
+        }
+        if (action === 'update') {
+          const err = updateL2Row(section, firstCell, cells);
+          if (err) return {ok: false, error: err};
+          return {ok: true, content: [{type: 'text', text: `L2 row "${firstCell}" updated in ${section}.`}]};
+        }
+        if (action === 'remove') {
+          const err = removeL2Row(section, firstCell);
+          if (err) return {ok: false, error: err};
+          return {ok: true, content: [{type: 'text', text: `L2 row "${firstCell}" removed from ${section}.`}]};
+        }
+        return {ok: false, error: `Unknown registry action: ${action} (add|update|remove)`};
       }
 
       if (kind === 'lesson') {
@@ -738,10 +823,12 @@ export default function (cmd: ModApi): void {
 
       if (!sub || sub === 'status') {
         const l1 = readL1Entries().length;
-        const l2 = readL2().split('\n').filter(l => l.trim().startsWith('|') && !l.includes('---')).length - 4;
+        const l2 = readL2()
+          .split(/\r?\n/)
+          .filter(l => /^\|\s*[^|\-]/.test(l.trim())).length;
         const l3 = listLessons().length;
         const ledger = readLedger().filter(e => !isTombstone(e.data)).length;
-        return {message: `Memory bank: ${l1} L1 events · ${Math.max(l2, 0)} L2 rows · ${l3} L3 lessons · ${ledger} verified episodes\nStore: ${storeDir}`};
+        return {message: `Memory bank: ${l1} L1 events · ${l2} L2 rows · ${l3} L3 lessons · ${ledger} verified episodes\nStore: ${storeDir}`};
       }
 
       if (sub === 'remember') {

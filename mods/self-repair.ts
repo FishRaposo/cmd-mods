@@ -569,9 +569,7 @@ export default function (cmd: ModApi): void {
       if (continuityEnabled() && taskLabel && topicTurns >= 3) {
         if (currentTaskLabel && currentTaskLabel !== taskLabel) {
           // Task changed — record old task duration
-          if (topicTurns >= 3) {
-            taskDurations[currentTaskLabel] = topicTurns;
-          }
+          taskDurations[currentTaskLabel] = topicTurns;
           // Reset per-task state for the new task
           selfReviewTriggered = false;
           resumes = 0;
@@ -674,6 +672,24 @@ export default function (cmd: ModApi): void {
       finalCheckpointStatus = 'completed';
 
       return { continue: false };
+    },
+  });
+
+  // ── Slash command: status ───────────────────────────────────────────────
+  cmd.addCommand({
+    name: 'self-repair',
+    description: 'Self-repair status: cycle, gate, files, resumes, checkpoint',
+    handler: () => {
+      const lines = [
+        `Cycle: ${currentCycleId ?? '(none)'}${cycleFromAutopilot ? ' (from autopilot)' : ''}`,
+        `Self-review: ${selfReviewEnabled() ? (selfReviewTriggered ? 'triggered' : 'armed') : 'off'}`,
+        `Files: ${filesTouched.size} touched · ${filesModified.size} modified`,
+        `Resumes: ${resumes}/${maxResumes()}`,
+        `Evidence: ${lastVerifyEvidence.length} green verify entries`,
+        `Checkpoint: ${checkpointPath}${checkpointsEnabled() ? '' : ' (disabled)'}`,
+        `Git state injection: ${gitStateEnabled() ? 'on' : 'off'}`,
+      ];
+      return {message: lines.join('\n')};
     },
   });
 

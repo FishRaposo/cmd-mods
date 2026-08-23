@@ -17,6 +17,19 @@ updated with every merged change.
   or warnings. Verified by reading the session transcript (the crash was
   in the harness's own projection path, mods never wrote to the durable
   store).
+- **memory-bank** — recall injection was dead: `transformContext` only read
+  string message content, but every message on the wire is array content, so
+  `lastUser` stayed empty and recall never fired. Now array-aware. Also:
+  `/bank status` L2 count no longer assumes exactly four header rows, and
+  recall `lastUse` timestamps persist into `recall-stats.json` for
+  maintenance decay.
+- **autopilot** — red-command guard no longer fires between actions: it
+  previously blocked the user's own `git push` all session in momentum
+  mode; scope is now the action lifetime only. Failed child-cycle verdicts
+  now record a terminal `repair-failed` receipt, mark the backlog entry
+  done, and step `greenChain` back instead of leaking guard state.
+- **self-repair** — removed dead nested `topicTurns >= 3` check in the
+  task-change branch of `onStop`.
 
 ### Mods
 
@@ -26,6 +39,20 @@ updated with every merged change.
   status, `/cache` for session/all-time history, `/cache-reset`, and one
   JSONL line per session in `~/.commandcode/cache-tracker.jsonl`.
   Registers no prompt hooks, so it can never affect the cache it measures.
+
+### Features
+
+- **memory-bank** — `bank_write` registry gains `action: add|update|remove`
+  so L2 pointer rows can be updated or retired, per the store contract.
+- **autopilot** — `/next-do` on a yellow action now records user approval
+  and makes it executable (approval is the one channel that legitimizes a
+  yellow).
+- **self-repair** — new `/self-repair` status command: cycle, self-review
+  gate state, files touched/modified, resumes used, evidence count,
+  checkpoint path.
+- **quality-guards** — new `/quality` status command: feature toggles,
+  consecutive failures, turns since green test, turns in run, current task,
+  files read, last build state.
 
 ## [1.1.0] — 2026-08-23
 

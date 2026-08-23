@@ -313,6 +313,9 @@ export default function (cmd: ModApi): void {
   let initiativeActions = 0;
   let initiativeTurns = 0;
   const decisionLog: DecisionEntry[] = [];
+  // Actions the user explicitly approved via /next-do — approval is the one
+  // channel that legitimizes a yellow; nextGreen() treats them as executable.
+  const userApproved = new Set<string>();
   let injectionBlockedAction = false;
   // Referee presence: probed synchronously on the first run. Without the
   // self-repair mod, momentum is permanently disabled (suggest-only).
@@ -336,15 +339,36 @@ export default function (cmd: ModApi): void {
   // ── Activation: verdict consumption ─────────────────────────────────────
   cmd.events.on('self-repair/verdict', (raw) => {
     const v = (raw ?? {}) as Record<string, unknown>;
-    if (v.final !== true || v.complete !== true) return;
+    if (v.final !== true) return;
     const childOfCurrentAction = currentActionId !== null &&
       typeof v.cycleId === 'string' && String(v.cycleId).includes('/' + currentActionId);
     if (childOfCurrentAction) {
-      // The action's child verification cycle finished: the action's lifetime
-      // ends here. Guard-state must not leak into subsequent turns.
+      // The action's child verification cycle finished — on success AND on a
+      // failed repair verdict. The action's lifetime ends here either way:
+      // guard-state must not leak into subsequent turns, and the receipt
+      // ledger needs the terminal outcome (receipts, not confidence).
+      const finished = backlog.find(a => a.id === currentActionId);
+      if (finished) finished.status = 'done';
+      writeReceipt({
+        ts: new Date().toISOString(),
+        cycleId: String(v.cycleId ?? 'unknown'),
+        actionId: currentActionId ?? 'n/a',
+        tier: finished?.tier ?? 'green',
+        title: finished?.title ?? 'child verification cycle',
+        why: finished?.why ?? '',
+        scope: finished?.scope ?? [],
+        verify: finished?.verify ?? [],
+        rollback: finished?.rollback ?? '',
+        outcome: v.complete === true ? 'done' : 'repair-failed',
+        ...(v.complete !== true
+          ? {stoppedBecause: 'child cycle verdict was not complete'}
+          : {}),
+      });
+      if (v.complete !== true) greenChain = Math.max(0, greenChain - 1);
       currentActionId = null;
       updateStatus();
     }
+    if (v.complete !== true) return;
     const verdict: RepairVerdict = {
       version: typeof v.version === 'number' ? v.version : 0,
       cycleId: typeof v.cycleId === 'string' ? v.cycleId : 'unknown',
@@ -549,7 +573,8 @@ export default function (cmd: ModApi): void {
   }
 
   function nextGreen(): NextAction | undefined {
-    return backlog.find(a => a.tier === 'green' && a.status === 'queued');
+    return backlog.find(a =>
+      (a.tier === 'green' || userApproved.has(a.id)) && a.status === 'queued');
   }
 
   function instructionBlock(action: NextAction): string {
@@ -743,6 +768,7 @@ export default function (cmd: ModApi): void {
       initiativeTurns = 0;
       injectionBlockedAction = false;
       backlog.length = 0;
+      userApproved.clear();
       return {action: 'continue'};
     },
   });
@@ -755,8 +781,10 @@ export default function (cmd: ModApi): void {
         'file_path' in (input as Record<string, unknown>)
         ? String((input as Record<string, unknown>).file_path) : '';
 
-      // Red commands are always blocked while initiative is active.
-      if ((currentActionId || effectiveMode() === 'momentum') && isRedCommand(cmdText)) {
+      // Red commands are blocked while an initiative action is ACTIVE.
+      // Between actions (even in momentum mode) the user's own commands
+      // must never be swallowed — guard-scope is the action lifetime.
+      if (currentActionId && isRedCommand(cmdText)) {
         return {
           block: true,
           additionalContext: 'RED — this action requires explicit human approval. ' +
@@ -834,6 +862,7 @@ export default function (cmd: ModApi): void {
       initiativeTurns = 0;
       injectionBlockedAction = false;
       backlog.length = 0;
+      userApproved.clear();
       updateStatus();
     },
   });
@@ -931,6 +960,12 @@ export default function (cmd: ModApi): void {
         return {message: `"${id}" is red — proposal only, cannot be queued.`};
       }
       action.status = 'queued';
+      if (action.tier === 'yellow') {
+        // User approval is the one channel that legitimizes a yellow —
+        // record it so nextGreen() can execute it.
+        userApproved.add(id);
+        return {message: `Queued ${id} (user-approved yellow): ${action.title}`};
+      }
       return {message: `Queued ${id}: ${action.title}`};
     },
   });

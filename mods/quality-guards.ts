@@ -547,6 +547,36 @@ export default function (cmd: ModApi): void {
     },
   });
 
+  // ── Slash command: status ───────────────────────────────────────────────
+  cmd.addCommand({
+    name: 'quality',
+    description: 'Quality-guards status: feature toggles, counters, current task',
+    handler: () => {
+      const toggles = [
+        ['failure-coaching', failureCoachingEnabled()],
+        ['loop-detection', loopDetectionEnabled()],
+        ['overwrite-guard', overwriteGuardEnabled()],
+        ['git-guard', gitGuardEnabled()],
+        ['long-running', longRunningEnabled()],
+        ['build-guard', buildGuardEnabled()],
+        ['test-budget', testBudgetEnabled()],
+        ['token-budget', tokenBudgetEnabled()],
+        ['drift', driftEnabled()],
+        ['run-length', runLengthEnabled()],
+      ];
+      const lines = [
+        `Toggles: ${toggles.map(([name, on]) => `${name}:${on ? 'on' : 'off'}`).join(' ')}`,
+        `Consecutive failures: ${consecutiveFailures} (STOP at ${maxFailures()})`,
+        `Turns since green test: ${turnsSinceTestPassed} (budget ${budgetTurns()})`,
+        `Turns in run: ${turnsInRun} (token warn at ${tokenWarnTurns()})`,
+        `Current task: ${currentTaskLabel ?? '(none)'} · turns ${topicTurns}`,
+        `Files read (overwrite guard): ${filesRead.size}`,
+        `Last build: ${lastBuildChecked ? (lastBuildPassed ? 'passed' : 'FAILED') : 'not checked'}`,
+      ];
+      return {message: lines.join('\n')};
+    },
+  });
+
   // ── Hooks: task-label tracking (drift + run-length) ─────────────────────
   cmd.hooks({
     onStop: async ({lastAssistantText}) => {
