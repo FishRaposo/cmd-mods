@@ -5,6 +5,11 @@ node_modules/
 .agents/
 .commandcode/
 
+# Personal runtime data — never relevant to the repo
+# (cache-tracker hit-rate data, learning stores, receipts)
+cache-tracker.jsonl
+*.jsonl
+
 # Separately-versioned kit — lives on disk, never published here
 _templates/
 

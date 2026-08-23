@@ -17,6 +17,34 @@ headers change only at milestone releases; day-to-day fixes and
 optimizations accumulate under the current **Unreleased** heading until the
 next bump. When in doubt, follow the format of the existing entries.
 
+## Message wire contract (postmortem: 2026-08-23 crash)
+
+Injected context messages MUST use array content blocks —
+`content: [{type: 'text', text}]` — never raw strings. The harness's wire
+projection (`prepareForSend` clean/heal, image-stripping, token
+estimation) calls `message.content.filter(...)` unguarded on the
+`transformContext` output, and a string-content message crashes the run
+with `message.content.filter is not a function`.
+
+Root cause of the crash that hit this suite: command-center,
+quality-guards, learn-loop, and memory-bank injected string-content user
+messages; the harness auto-updated to a version whose projection assumed
+array content. It was intermittent — it only fired on turns where recall
+or a warning actually injected — and it survived smoke tests because
+one-shot runs never trigger injection. The durable session store was
+never polluted (transcripts showed zero string-content messages); only the
+in-memory working array crashed.
+
+Two rules from the postmortem:
+
+- **Mods load once per process.** After fixing an installed mod, the
+  running session still executes the old code — restart (or `/reload`)
+  before the fix can be exercised.
+- **Diagnose from the transcript.** The session JSONL under
+  `~/.commandcode/projects/` showed the crash turn's message shapes and
+  the auto-compact boundary; the error text alone was misleading (the
+  failing `.filter` was in harness code, not a mod).
+
 ## Cache discipline (non-negotiable)
 
 The system prompt must stay byte-identical across turns. Provider prompt
