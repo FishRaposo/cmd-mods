@@ -1,4 +1,4 @@
-# cmd-mods — agent guidance
+# command-code-mods — agent guidance
 
 This repo is a composable suite of Command Code mods. Each mod is a single
 TypeScript file in `mods/` registered through the ModApi, and each is

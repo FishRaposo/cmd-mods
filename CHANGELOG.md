@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the cmd-mods suite are tracked here, one entry per mod.
+All notable changes to the command-code-mods suite are tracked here, one entry per mod.
 This file is the single source of truth for what changed and when — keep it
 updated with every merged change.
 
@@ -38,6 +38,10 @@ updated with every merged change.
   spurious drift reminders.
 
 ### Repo
+
+- **Repository identity** — the public repository was renamed from `cmd-mods` to
+  `command-code-mods`; the local source checkout may retain its historical folder
+  name for workspace compatibility.
 
 - **README rewritten as a portfolio piece** — pitch, mermaid pipeline
   diagram, per-mod capability tables, design principles, engineering

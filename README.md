@@ -1,9 +1,9 @@
-# cmd-mods
+# command-code-mods
 
 A composable suite of agent mods that turn Command Code into a self-verifying,
 self-improving engineering system.
 
-![contract check](https://github.com/FishRaposo/cmd-mods/actions/workflows/contracts.yml/badge.svg)
+![contract check](https://github.com/FishRaposo/command-code-mods/actions/workflows/contracts.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Why this exists
@@ -111,7 +111,7 @@ provider- and session-dependent; `/cache` shows your own live numbers.
 Install the full suite:
 
 ```bash
-commandcode mods add -g FishRaposo/cmd-mods
+commandcode mods add -g FishRaposo/command-code-mods
 commandcode mods list    # verify: seven mods, zero load warnings
 ```
 
@@ -122,7 +122,7 @@ Install a single mod by keeping only what you want via the object form of
 {
   "mods": {
     "sources": [
-      {"source": "FishRaposo/cmd-mods", "mods": ["learn-loop.ts"]}
+      {"source": "FishRaposo/command-code-mods", "mods": ["learn-loop.ts"]}
     ]
   }
 }
@@ -134,7 +134,7 @@ Drop `-g` for project scope. On Windows the binary is `commandcode` (alias
 ## Repository layout
 
 ```
-cmd-mods/
+command-code-mods/
 ├── mods/                    # One TypeScript file per mod, standalone-installable
 ├── scripts/
 │   └── check-contracts.mjs  # Mechanical cross-mod contract check (runs in CI)

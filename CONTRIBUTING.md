@@ -1,4 +1,4 @@
-# Contributing to cmd-mods
+# Contributing to command-code-mods
 
 Thanks for helping make this suite better. It's small by design, so the bar
 is simple and mechanical.

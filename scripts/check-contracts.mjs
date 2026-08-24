@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Mechanical cross-mod contract check for the cmd-mods suite.
+// Mechanical cross-mod contract check for the command-code-mods suite.
 // Dependency-free: parses mods/*.ts source with regexes and validates
 //   1. event emit ↔ on pairing (every emitted namespaced event has a listener)
 //   2. unique slash-command names across mods
