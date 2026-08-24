@@ -19,6 +19,11 @@ import * as os from 'node:os';
 // They share no state, no commands, and no store. Both may recall
 // contextually — memory-bank injects [memory] leads, learn-loop injects
 // pattern leads — and both stay quiet and capped.
+//
+// Harness-neutral twin: the templates kit's learning-loop.md protocol owns
+// this lifecycle (record → distill → shadow → promote → merge/decay) for any
+// harness. The `.agents/learning/` store layout is shared with the protocol —
+// if this mod's layout changes, update the protocol's "drift boundary" note.
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

@@ -32,6 +32,10 @@ import * as path from 'node:path';
 //     tasks. Reads task durations from session-persistence's checkpoint
 //     (.commandcode/checkpoint.json) when that mod is installed; otherwise
 //     stays inert. (qg-run-length)
+//
+// Harness-neutral twin: the templates kit's resume-continuity.md protocol
+// owns checkpoint/resume for any harness; quality-guards' failure coaching,
+// drift, and run-length signals feed its abrupt-stop handling.
 
 // ── Pure helpers (no ModApi dependency) ────────────────────────────────────
 
@@ -194,18 +198,34 @@ function isLongRunning(cmd: string): boolean {
   return cmd.length > 0 && LONG_RUNNING_COMMANDS.some(p => p.test(cmd));
 }
 
-function extractTaskLabel(text: string): string | null {
-  const match = text.match(
-    /\b(implement|build|migrat|refactor|fix|add|configure|wire|deploy|setup|create|update|remove|rewrite|upgrade)\w*\s+([\w\s\-/.()]{3,80}?)[\.\n]/i,
-  );
-  if (!match) return null;
-  const label = match[0].trim();
-  // Document phrases like "updated in the same commit." or "tracked in this
-  // file." read as task verbs but describe the artifact, not the task.
-  if (/\b(same commit|this commit|this file|the changelog|the readme|the repo|this branch|this session)\b/i.test(label)) {
-    return null;
+// Discussion OF the session state (resumes, checkpoints, drift) is not a work
+// task. Scanning the assistant's summary for "verb + phrase." sentences
+// captured report tails ("updated to point at the checker.") as task labels;
+// the current task must come from the user's real prompt instead.
+const SESSION_META_SIGNALS =
+  /\b(interrupt|resume|resuming|checkpoint|mid.?task|replay|fragment|drift|advisory|mod-managed|do not restart|continue from exactly|from where you stopped|from where you left off|work appears incomplete|no restart)\b/i;
+
+function lastUserTaskLabel(messages: readonly unknown[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as Record<string, unknown> | null | undefined;
+    if (!m || m.role !== 'user') continue;
+    const content = m.content;
+    let text = '';
+    if (typeof content === 'string') text = content;
+    else if (Array.isArray(content)) {
+      text = content
+        .filter((p: unknown) => typeof p === 'object' && p !== null &&
+          (p as Record<string, unknown>).type === 'text')
+        .map((p: unknown) => String((p as Record<string, unknown>).text || ''))
+        .join(' ');
+    }
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (clean.length === 0) continue; // tool-result user messages carry no text
+    if (SESSION_META_SIGNALS.test(clean)) return null;
+    if (clean.length < 12) continue; // "yes", "approve", "1-2" are continuations
+    return clean.length > 80 ? `${clean.slice(0, 80).replace(/\s+\S*$/, '')}…` : clean;
   }
-  return label;
+  return null;
 }
 
 function taskSimilarity(a: string, b: string): number {
@@ -586,8 +606,11 @@ export default function (cmd: ModApi): void {
 
   // ── Hooks: task-label tracking (drift + run-length) ─────────────────────
   cmd.hooks({
-    onStop: async ({lastAssistantText}) => {
-      const taskLabel = extractTaskLabel(lastAssistantText);
+    onStop: async ({state}) => {
+      const msgs = Array.isArray((state as Record<string, unknown>).messages)
+        ? (state as Record<string, unknown>).messages as readonly unknown[]
+        : [];
+      const taskLabel = lastUserTaskLabel(msgs);
       if (taskLabel && topicTurns >= 3) {
         if (currentTaskLabel && currentTaskLabel !== taskLabel) {
           if (topicTurns >= 3) {

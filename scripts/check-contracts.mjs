@@ -24,7 +24,28 @@ const FLAG_PREFIXES = {
   'memory-bank.ts': 'mb-',
   'learn-loop.ts': 'll-',
   'cache-tracker.ts': 'ct-',
+  'protocol-loader.ts': 'pl-',
+  'error-tracker.ts': 'et-',
 };
+
+// Events the harness itself emits natively (AgentEvent catalog + host lifecycle),
+// which mods may listen to without any in-suite emitter.
+const HARNESS_NATIVE_EVENTS = new Set([
+  'run_start', 'run_end', 'turn_start', 'turn_end',
+  'message_start', 'message_end', 'message_update',
+  'text_delta', 'thinking_start', 'thinking_delta', 'thinking_end',
+  'model_request_start', 'model_request_end',
+  'tool_queued', 'tool_denied', 'tool_hook_blocked', 'tool_running',
+  'tool_update', 'tool_completed', 'tool_errored',
+  'subagent_start', 'subagent_stop', 'subagent_progress',
+  'api_retry', 'interrupted', 'continuation_recovery',
+  'tool_input_coerced', 'tool_input_repaired',
+  'mod_error', 'run_error',
+  'skill_loaded', 'session_titled', 'permission_mode_changed',
+  'config_setting_changed', 'notice',
+  'compaction_start', 'compaction_done',
+  'session_start', 'session_shutdown',
+]);
 
 const sources = new Map();
 for (const f of readdirSync(modsDir).filter(f => f.endsWith('.ts'))) {
@@ -52,7 +73,7 @@ for (const [event, emitters] of emits) {
   }
 }
 for (const [event, listeners] of ons) {
-  if (!emits.has(event) && !['tool_queued', 'tool_completed', 'tool_errored', 'turn_start', 'turn_end', 'run_start', 'run_end', 'subagent_start', 'subagent_stop', 'subagent_progress', 'skill_loaded', 'model_request_start', 'model_request_end'].includes(event)) {
+  if (!emits.has(event) && !HARNESS_NATIVE_EVENTS.has(event)) {
     problems.push(`event "${event}" has listeners (${listeners.join(', ')}) but nothing in the suite emits it`);
   }
 }
@@ -96,6 +117,51 @@ for (const [file, src] of sources) {
     if (!/timeout\s*:/.test(tail)) {
       const line = src.slice(0, callStart).split('\n').length;
       problems.push(`${file}:${line}: execSync without an explicit timeout`);
+    }
+  }
+}
+
+// ── 7. Protocol-twin declarations ──────────────────────────────────────────
+// Mirrors the templates kit's twin map (lib/system/protocol-lint.mjs): each
+// mod that mechanically twins a kit protocol must declare it in its header as
+// "Harness-neutral twin:" so both repos validate their own side of the
+// relationship without importing each other. If a twin's name or trigger
+// changes in one repo, the other's header becomes checkable drift instead of
+// silent divergence.
+const KIT_PROTOCOL_TWINS = {
+  'self-repair.ts': ['completion-gate', 'resume-continuity'],
+  'quality-guards.ts': ['resume-continuity'],
+  'autopilot.ts': ['verified-followthrough'],
+  'learn-loop.ts': ['learning-loop'],
+  'command-center.ts': ['plan-briefing'],
+  'memory-bank.ts': ['memory-maintenance'],
+};
+const ALL_TWIN_PROTOCOLS = new Set([
+  'completion-gate', 'resume-continuity', 'verified-followthrough',
+  'learning-loop', 'plan-briefing', 'memory-maintenance',
+]);
+for (const [file, expected] of Object.entries(KIT_PROTOCOL_TWINS)) {
+  const src = sources.get(file);
+  if (!src) continue;
+  const header = src.slice(0, 4000);
+  for (const protocol of expected) {
+    if (!header.includes(protocol)) {
+      problems.push(`${file}: header must declare harness-neutral twin "${protocol}" (templates kit twin map)`);
+    }
+  }
+}
+for (const [file, src] of sources) {
+  const header = src.slice(0, 4000);
+  for (const m of header.matchAll(/(?:harness-neutral twin|shared with the protocol|protocol owns this)[\s\S]{0,120}?([a-z][a-z0-9-]*\.md)\b/gi)) {
+    const protocol = m[1].replace(/\.md$/, '');
+    if (!ALL_TWIN_PROTOCOLS.has(protocol)) {
+      problems.push(`${file}: header references protocol "${protocol}" that is not in the canonical twin set`);
+    }
+  }
+  if (header.includes('harness-neutral twin') || header.includes('Harness-neutral twin')) {
+    const named = KIT_PROTOCOL_TWINS[file] ?? [];
+    if (named.length === 0) {
+      problems.push(`${file}: declares a harness-neutral twin but the twin map lists no kit protocols for this mod`);
     }
   }
 }

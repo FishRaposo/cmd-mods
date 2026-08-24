@@ -22,6 +22,10 @@ import * as os from 'node:os';
 //   - yellow/red are proposed only, red attempts are blocked;
 //   - every executed action re-enters self-repair verification;
 //   - receipts are written to .commandcode/autopilot/receipts.jsonl.
+//
+// Harness-neutral twin: the templates kit's verified-followthrough.md protocol
+// owns the same tiered backlog + mandate + receipts discipline for any harness;
+// receipts there live under the project's .agents/ follow-through ledger.
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

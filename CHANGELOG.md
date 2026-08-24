@@ -6,6 +6,69 @@ updated with every merged change.
 
 ## [Unreleased]
 
+### New mods
+
+- **protocol-loader** — loads `.agents/protocols/*.md` on demand, like skills:
+  discovers the tree in cwd and ancestor workspaces, trigger-matches each
+  protocol's "Run when …" frontmatter against typed prompts, activates the best
+  match, and rides the message tail via `transformContext` (system prompt stays
+  byte-stable). `/protocol <name>` is the explicit `/name` analog; `/protocols`
+  lists discovered protocols with load state; `/protocol-clear` resets the
+  session. Makes the wrapper-skill shim optional on Command Code while leaving
+  harnesses without native triggering on the AGENTS.md rule as the baseline.
+- **error-tracker** — suite-wide error observability, pure observer (no prompt
+  hooks). Tracks `mod_error` (per mod → hook), `tool_errored` (per tool),
+  `run_error`, `api_retry`, and `interrupted` across the whole suite, shows a
+  footer badge, and appends one redacted JSONL line per error to
+  `~/.commandcode/error-tracker.jsonl` (locked appends, retention-capped).
+  `/errors` reports session aggregates + recent history; `/errors-clear`
+  resets. New `et-status` / `et-limit` flags. `tool_errored` failures are
+  attributed to their tool via the `tool_queued` call-id map. check-contracts
+  now whitelists the full harness-native event catalog (mod_error, run_error,
+  api_retry, interrupted, compaction, and friends), so error listeners no
+  longer trip the "nothing emits it" check.
+
+### Fixes
+
+- **self-repair** — the "current task" label now comes from the user's real
+  prompt (`lastUserTaskLabel` over `state.messages`), never from scanning the
+  assistant's summary for "verb + phrase." sentences. The old extractor
+  captured report tails ("add a dev-mode churn diagnostic).", "updated to
+  point at the checker.") as task labels; those phantom labels changed every
+  stop, reset the resume budget, and fed both the drift reminders and the
+  sudden-stop resume loop. Also: `lastIntent` truncates at a word boundary;
+  `extractNextAction` refuses session-meta fragments; the sudden-stop resume
+  branches no longer fire when the assistant is itself discussing session
+  state (resumes/checkpoints/drift), which previously echoed "interrupted
+  mid-task — continue from exactly where you stopped" as self-sustaining
+  automated turns.
+- **quality-guards** — same user-prompt-sourced task label for the drift and
+  run-length warnings; meta-talk about the session is no longer labeled a task.
+
+### Kit parity
+
+- **command-center** — the default plan artifact home is now the project's
+  `docs/plans/` when a docs tree exists (the templates kit convention), falling
+  back to `~/.commandcode/plans/`; the `cc-plan-path` flag remains an explicit
+  override. Aligns the mod with `plan-briefing` protocol output locations.
+- **memory-bank** — header now documents `episodes.jsonl` parity with the
+  templates kit's memory template and names the kit's `memory-maintenance` /
+  `learning-loop` protocols as the harness-neutral twins of recall and graduation.
+- **self-repair** — header comment maps the self-review gate and checkpoint/resume
+  to the kit's `completion-gate.md` (critical-review + evidence steps) and
+  `resume-continuity.md` protocols; the mod is the mechanical Command Code layer,
+  the protocols are the portable ones.
+- **autopilot** — header comment names the kit's `verified-followthrough.md`
+  protocol as the harness-neutral twin of the tiered backlog + mandate + receipts.
+- **learn-loop** / **command-center** / **quality-guards** — headers now declare
+  their harness-neutral twins (`learning-loop.md`, `plan-briefing.md`,
+  `resume-continuity.md`) so the full twin relationship is visible from every mod.
+- **check-contracts** — new section 7 validates protocol-twin declarations
+  mechanically: every mod the templates kit's twin map names must declare its
+  protocol twin in its header, and headers may not reference protocols outside
+  the canonical twin set. Two repos, no cross-repo import — each validates its
+  own side of the relationship.
+
 ### Parallel-session safety
 
 - **learn-loop** — every store write (index, episodes, skill-dir moves,

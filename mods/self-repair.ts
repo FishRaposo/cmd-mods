@@ -26,6 +26,11 @@ import { execSync } from 'node:child_process';
 //
 // With sr-self-review off, no verdict is ever emitted — autopilot stays
 // muted. That is intentional: no referee judgment, no initiative.
+//
+// Harness-neutral twin: the templates kit's completion-gate.md owns the same
+// critical-review gate + verification-evidence discipline on any harness
+// (steps 7-8); the kit's resume-continuity.md owns checkpoint/resume. The mod
+// is the mechanical Command Code layer; the protocols are the portable ones.
 
 // ── Pure helpers (no ModApi dependency) ────────────────────────────────────
 
@@ -144,24 +149,57 @@ function extractNextAction(text: string): string | null {
     const match = text.match(pattern);
     if (match) {
       const captured = (match[1] + ' ' + (match[2] || '')).trim();
+      // Report prose and session-state talk are not "next actions" — refuse
+      // to persist fragments like "about to occasionally be late…".
+      if (SESSION_META_SIGNALS.test(captured)) continue;
       if (captured.length > 10 && captured.length < 200) return captured;
     }
   }
   return null;
 }
 
-function extractTaskLabel(text: string): string | null {
-  const match = text.match(
-    /\b(implement|build|migrat|refactor|fix|add|configure|wire|deploy|setup|create|update|remove|rewrite|upgrade)\w*\s+([\w\s\-/.()]{3,80}?)[\.\n]/i,
-  );
-  if (!match) return null;
-  const label = match[0].trim();
-  // Document phrases like "updated in the same commit." read as task verbs
-  // but describe the artifact, not the task.
-  if (/\b(same commit|this commit|this file|the changelog|the readme|the repo|this branch|this session)\b/i.test(label)) {
-    return null;
+// Discussion OF the session state (resumes, checkpoints, drift) is not a work
+// task. Used to keep task labels, next-actions, and the sudden-stop resume
+// loop from latching onto the agent's own meta-commentary — which previously
+// produced self-sustaining "continue from where you stopped" echoes.
+const SESSION_META_SIGNALS =
+  /\b(interrupt|resume|resuming|checkpoint|mid.?task|replay|fragment|drift|advisory|mod-managed|do not restart|continue from exactly|from where you stopped|from where you left off|work appears incomplete|no restart)\b/i;
+
+// The CURRENT TASK label comes from the user's real prompt, never from the
+// assistant's summary text. Scanning the assistant's final message for
+// "verb + phrase." sentences captured report tails ("updated to point at the
+// checker.", "add a dev-mode churn diagnostic).") as task labels; those
+// phantom labels reset the resume budget every stop and fed the drift
+// reminders. Returns null when the last user text is a continuation
+// ("yes", "1-2"), an automated stop-hook reason, or session-state talk.
+function lastUserTaskLabel(messages: readonly unknown[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as Record<string, unknown> | null | undefined;
+    if (!m || m.role !== 'user') continue;
+    const content = m.content;
+    let text = '';
+    if (typeof content === 'string') text = content;
+    else if (Array.isArray(content)) {
+      text = content
+        .filter((p: unknown) => typeof p === 'object' && p !== null &&
+          (p as Record<string, unknown>).type === 'text')
+        .map((p: unknown) => String((p as Record<string, unknown>).text || ''))
+        .join(' ');
+    }
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (clean.length === 0) continue; // tool-result user messages carry no text
+    if (SESSION_META_SIGNALS.test(clean)) return null;
+    if (clean.length < 12) continue; // "yes", "approve", "1-2" are continuations
+    return clean.length > 80 ? `${clean.slice(0, 80).replace(/\s+\S*$/, '')}…` : clean;
   }
-  return label;
+  return null;
+}
+
+// Truncate at a word boundary so checkpoint continuity text never ends
+// mid-word (the previous 500-char slice did).
+function safeTextSlice(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max).replace(/\s+\S*$/, '');
 }
 
 // ── Mod ─────────────────────────────────────────────────────────────────────
@@ -664,7 +702,7 @@ export default function (cmd: ModApi): void {
 
   // ── Hooks: task continuity + self-review + interruption resume + sudden-stop ──
   cmd.hooks({
-    onStop: async ({lastAssistantText, stopReason}) => {
+    onStop: async ({state, lastAssistantText, stopReason}) => {
       // A user interrupt is an explicit abort: never resume or self-review
       // over it. Let the run stop.
       if (stopReason === 'interrupted') {
@@ -672,8 +710,13 @@ export default function (cmd: ModApi): void {
         return { continue: false };
       }
 
-      // Extract task label for duration tracking
-      const taskLabel = extractTaskLabel(lastAssistantText);
+      // The task label comes from the user's real prompt, never from the
+      // assistant's summary text (which captured report fragments and
+      // re-armed the resume budget every stop).
+      const msgs = Array.isArray((state as Record<string, unknown>).messages)
+        ? (state as Record<string, unknown>).messages as readonly unknown[]
+        : [];
+      const taskLabel = lastUserTaskLabel(msgs);
       if (continuityEnabled() && taskLabel && topicTurns >= 3) {
         if (currentTaskLabel && currentTaskLabel !== taskLabel) {
           // Task changed — record old task duration
@@ -688,7 +731,7 @@ export default function (cmd: ModApi): void {
 
       // Extract intent and next action for checkpoint continuity
       if (continuityEnabled() && (taskLabel || (currentTaskLabel && topicTurns >= 3))) {
-        lastIntent = lastAssistantText.slice(0, 500);
+        lastIntent = safeTextSlice(lastAssistantText, 500);
         const next = extractNextAction(lastAssistantText);
         if (next) nextAction = next;
       }
@@ -738,13 +781,16 @@ export default function (cmd: ModApi): void {
       // ── Sudden-stop resume ──────────────────────────────────────────
       const noSignal = !isClosing;
       const textIsShort = lastAssistantText.length < 200;
+      // Discussing the session state itself (resumes, checkpoints, drift) is
+      // NOT a surprise interruption — resuming on that would echo forever.
+      const isMetaDiscussion = SESSION_META_SIGNALS.test(lastAssistantText);
       const wasProcessing =
         /\b(reading|writing|editing|running|testing|building|executing|committing|checking|verifying)\b/i.test(
           lastAssistantText,
         );
 
       const maxR = maxResumes();
-      if (noSignal && textIsShort && wasProcessing && resumes < maxR && filesModified.size > 0) {
+      if (noSignal && textIsShort && wasProcessing && !isMetaDiscussion && resumes < maxR && filesModified.size > 0) {
         resumes++;
         finalCheckpointStatus = 'interrupted';
         return {
@@ -763,7 +809,7 @@ export default function (cmd: ModApi): void {
             lastAssistantText,
           );
 
-        if ((interrupted || unfinished) && filesModified.size > 0) {
+        if ((interrupted || unfinished) && !isMetaDiscussion && filesModified.size > 0) {
           resumes++;
           finalCheckpointStatus = 'interrupted';
           return {

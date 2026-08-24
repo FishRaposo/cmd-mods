@@ -11,7 +11,14 @@ import * as path from 'node:path';
 //   L1-ARCHIVE.md  — compaction target (verbatim moves)
 //   L2-REGISTRY.md — four fixed tables of POINTERS to source-of-truth
 //   L3-LESSONS/    — one lesson per file with frontmatter
-//   episodes.jsonl — verified-episode ledger (private feed + audit trail)
+//   episodes.jsonl — verified-episode ledger (private feed + audit trail;
+//                    mirrors the templates kit's memory/episodes.jsonl — the
+//                    kit's check-memory.mjs intentionally ignores it)
+//
+// The store contract is byte-compatible with the templates kit's bundled
+// memory template (memory/README.md is the canonical contract); the harness-
+// neutral twin of this mod's recall/graduation is the kit's memory-maintenance
+// protocol and the learning-loop protocol.
 //
 // North star:
 //   No write-bar pass, no memory.

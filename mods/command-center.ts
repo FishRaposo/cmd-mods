@@ -2,6 +2,12 @@ import type {ModApi} from '@commandcode/harness';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
+// ── Harness-neutral twin ────────────────────────────────────────────────────
+// The templates kit's plan-briefing.md protocol owns the same decision-funnel
+// briefing → compile → review state machine for any harness. This mod is the
+// mechanical Command Code layer; the protocol is the portable one. Keep the
+// BRIEFING/COMPILING/REVIEW states and the `docs/plans/` artifact in sync.
+
 // ── Write-tool blocklist ────────────────────────────────────────────────────
 
 const WRITE_TOOLS = new Set([
@@ -128,6 +134,18 @@ export default function (cmd: ModApi): void {
 
   // ─── Resolve plan path (expand ~ to home, resolve relative to cwd) ─────
   function resolvedPlanPath(): string {
+    // Kit convention: default to the project's docs/plans/ when a docs/ tree
+    // exists and the plan path flag was not explicitly overridden, so the
+    // plan artifact lands where the templates kit expects it.
+    const flagValue = String(cmd.getFlag('cc-plan-path') ?? '');
+    const notOverridden = !flagValue || flagValue === '~/.commandcode/plans/';
+    if (notOverridden) {
+      try {
+        if (fs.existsSync(path.join(cmd.cwd, 'docs', 'plans'))) {
+          return path.join(cmd.cwd, 'docs', 'plans') + path.sep;
+        }
+      } catch { /* fall through to default */ }
+    }
     let base = planPath();
     if (base.startsWith('~/')) {
       base = path.join(os.homedir(), base.slice(2));
