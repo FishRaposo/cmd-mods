@@ -39,9 +39,9 @@ updated with every merged change.
 
 ### Repo
 
-- **Repository identity** — the public repository was renamed from `cmd-mods` to
-  `command-code-mods`; the local source checkout may retain its historical folder
-  name for workspace compatibility.
+- **Repository identity** — the public repository and active source checkout were
+  renamed from `cmd-mods` to `command-code-mods`; historical changelog references
+  retain the old name only as lineage.
 
 - **README rewritten as a portfolio piece** — pitch, mermaid pipeline
   diagram, per-mod capability tables, design principles, engineering
