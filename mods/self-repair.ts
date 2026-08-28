@@ -2,6 +2,7 @@ import type {ModApi} from '@commandcode/harness';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
+import { lastUserTaskLabel, SESSION_META_SIGNALS } from '../lib/lastUserTaskLabel.ts';
 
 // ── Self-Repair — the completion judge. ──────────────────────────────────────
 //
@@ -162,38 +163,7 @@ function extractNextAction(text: string): string | null {
 // task. Used to keep task labels, next-actions, and the sudden-stop resume
 // loop from latching onto the agent's own meta-commentary — which previously
 // produced self-sustaining "continue from where you stopped" echoes.
-const SESSION_META_SIGNALS =
-  /\b(interrupt|resume|resuming|checkpoint|mid.?task|replay|fragment|drift|advisory|mod-managed|do not restart|continue from exactly|from where you stopped|from where you left off|work appears incomplete|no restart)\b/i;
-
-// The CURRENT TASK label comes from the user's real prompt, never from the
-// assistant's summary text. Scanning the assistant's final message for
-// "verb + phrase." sentences captured report tails ("updated to point at the
-// checker.", "add a dev-mode churn diagnostic).") as task labels; those
-// phantom labels reset the resume budget every stop and fed the drift
-// reminders. Returns null when the last user text is a continuation
-// ("yes", "1-2"), an automated stop-hook reason, or session-state talk.
-function lastUserTaskLabel(messages: readonly unknown[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as Record<string, unknown> | null | undefined;
-    if (!m || m.role !== 'user') continue;
-    const content = m.content;
-    let text = '';
-    if (typeof content === 'string') text = content;
-    else if (Array.isArray(content)) {
-      text = content
-        .filter((p: unknown) => typeof p === 'object' && p !== null &&
-          (p as Record<string, unknown>).type === 'text')
-        .map((p: unknown) => String((p as Record<string, unknown>).text || ''))
-        .join(' ');
-    }
-    const clean = text.replace(/\s+/g, ' ').trim();
-    if (clean.length === 0) continue; // tool-result user messages carry no text
-    if (SESSION_META_SIGNALS.test(clean)) return null;
-    if (clean.length < 12) continue; // "yes", "approve", "1-2" are continuations
-    return clean.length > 80 ? `${clean.slice(0, 80).replace(/\s+\S*$/, '')}…` : clean;
-  }
-  return null;
-}
+// SESSION_META_SIGNALS is imported from lib/lastUserTaskLabel.ts.
 
 // Truncate at a word boundary so checkpoint continuity text never ends
 // mid-word (the previous 500-char slice did).

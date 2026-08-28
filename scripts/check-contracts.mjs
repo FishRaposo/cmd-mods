@@ -9,7 +9,7 @@
 //   6. every child_process exec call passes a timeout
 // Exit 0 = all contracts hold; exit 1 = violations printed.
 
-import {readdirSync, readFileSync} from 'node:fs';
+import {readdirSync, readFileSync, existsSync} from 'node:fs';
 import {join, dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
@@ -166,9 +166,47 @@ for (const [file, src] of sources) {
   }
 }
 
+// ── 8. Per-folder concrete files carry no placeholders or kit paths ────────
+// The suite's per-folder convention (mods/index.md + mods/AGENTS.md) lives
+// alongside the mod sources. These files are concrete (not templates), so
+// they must not carry operational placeholders or portability leaks — the
+// same rule the templates kit's check-templates.mjs applies to its own
+// per-folder files. The scan is by name so a future per-folder file
+// (e.g. scripts/index.md) is picked up automatically.
+export function stripHtmlComments(text) {
+  return text.replace(/<!--[\s\S]*?-->/g, '');
+}
+export function findOperationalPlaceholders(text) {
+  return [...stripHtmlComments(text).matchAll(/\{\{[^{}\n]+\}\}/g)].map(m => m[0]);
+}
+export function findNonPortableReferences(text) {
+  const body = stripHtmlComments(text);
+  const findings = [];
+  if (/_templates[\\/]/i.test(body)) findings.push('references _templates/');
+  if (/C:[\\/]_Career Hub[\\/]/i.test(body)) findings.push('references a Career Hub-local path');
+  return findings;
+}
+const PER_FOLDER_FILES = new Set(['index.md', 'AGENTS.md']);
+for (const folder of readdirSync(root, {withFileTypes: true})
+  .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !['node_modules'].includes(entry.name))
+  .map(entry => entry.name)) {
+  const folderRoot = join(root, folder);
+  for (const filename of PER_FOLDER_FILES) {
+    const filePath = join(folderRoot, filename);
+    if (!existsSync(filePath)) continue;
+    const text = readFileSync(filePath, 'utf-8');
+    for (const ph of findOperationalPlaceholders(text)) {
+      problems.push(`${folder}/${filename}: contains operational placeholder '${ph}'`);
+    }
+    for (const finding of findNonPortableReferences(text)) {
+      problems.push(`${folder}/${filename}: ${finding}`);
+    }
+  }
+}
+
 if (problems.length > 0) {
   console.error(`CONTRACT CHECK FAILED (${problems.length}):`);
   for (const p of problems) console.error(`  ✗ ${p}`);
   process.exit(1);
 }
-console.log(`contract check OK — ${sources.size} mods, ${emits.size} internal events, all paired; command/tool/renderer names unique; flag prefixes valid; exec timeouts present`);
+console.log(`contract check OK — ${sources.size} mods, ${emits.size} internal events, all paired; command/tool/renderer names unique; flag prefixes valid; exec timeouts present; per-folder files clean`);

@@ -6,6 +6,21 @@ updated with every merged change.
 
 ## [Unreleased]
 
+### Tooling
+
+- **Per-folder convention** — `mods/index.md` (structural map of the nine mod sources) and `mods/AGENTS.md` (per-folder tier rules for the mod sources) now ship with the suite. `scripts/check-contracts.mjs` extends with an 8th check: any per-folder `index.md` / `AGENTS.md` in the suite must be free of operational placeholders and kit-path leaks (the same rule the templates kit's `check-templates.mjs` applies to its own per-folder files). The scan is by name, so a future per-folder file (e.g. `scripts/index.md`) is picked up automatically. `scripts/check-contracts.test.mjs` pins the helpers with four cases. The root `AGENTS.md`, the mod sources, and `lib/` are unchanged — this is additive.
+- **scripts/sync-user-scope.mjs** — the AGENTS.md verification gate
+  ("copy the changed files to `~/.commandcode/mods/`) now has a mechanical
+  implementation. `node scripts/sync-user-scope.mjs` copies any `mods/*.ts`
+  whose hash differs from the installed copy; `--check` exits 1 on drift
+  without writing (CI / pre-commit gate). It also syncs `lib/*.ts` to
+  `~/.commandcode/lib/` — the shared helpers that mods import
+  (`../lib/lastUserTaskLabel.ts` resolves to `~/.commandcode/lib/`, which is
+  not a mod-loading dir, so it must live there, not in `~/.commandcode/mods/`).
+  Override the dirs with `COMMANDCODE_MODS_DIR` / `COMMANDCODE_MODS_LIB_DIR`.
+  Wired into `package.json` as `npm run sync`
+  and `npm run sync:check`.
+
 ### New mods
 
 - **protocol-loader** — loads `.agents/protocols/*.md` on demand, like skills:
@@ -30,6 +45,22 @@ updated with every merged change.
 
 ### Fixes
 
+- **self-repair** — `lastUserTaskLabel` and `SESSION_META_SIGNALS` extracted
+  to a shared `lib/lastUserTaskLabel.ts`; the mod now imports them. The
+  previous inlined copy was byte-identical to quality-guards' copy, so any
+  change to the meta-talk heuristic had to be made in two files. Drift
+  between the two was the failure mode this extraction prevents.
+- **quality-guards** — same `lastUserTaskLabel` extraction; this mod also
+  imports the shared helper now. Drift/run-length signals stay sourced from
+  the user's real prompt and continue to share the heuristic with self-repair.
+- **self-repair / quality-guards** (new shared helper) — `lib/lastUserTaskLabel.ts`
+  is the single source of truth for "what is the user actually working on
+  right now?" Both mods consume the same `SESSION_META_SIGNALS` regex and the
+  same extraction loop. The lib file is **not** synced to the mod install
+  dir (the harness auto-loads every `.ts` under `~/.commandcode/mods/` as
+  a mod; the shared helper is imported by mods at TypeScript build time, not
+  loaded directly). `scripts/sync-user-scope.mjs` enforces this by syncing
+  only `mods/*.ts`.
 - **self-repair** — the "current task" label now comes from the user's real
   prompt (`lastUserTaskLabel` over `state.messages`), never from scanning the
   assistant's summary for "verb + phrase." sentences. The old extractor

@@ -2,6 +2,7 @@ import type {ModApi} from '@commandcode/harness';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { lastUserTaskLabel, SESSION_META_SIGNALS } from '../lib/lastUserTaskLabel.ts';
 
 // ── Quality Guards — nudge the agent away from dumb mistakes ─────────────────
 //
@@ -199,34 +200,8 @@ function isLongRunning(cmd: string): boolean {
 }
 
 // Discussion OF the session state (resumes, checkpoints, drift) is not a work
-// task. Scanning the assistant's summary for "verb + phrase." sentences
-// captured report tails ("updated to point at the checker.") as task labels;
-// the current task must come from the user's real prompt instead.
-const SESSION_META_SIGNALS =
-  /\b(interrupt|resume|resuming|checkpoint|mid.?task|replay|fragment|drift|advisory|mod-managed|do not restart|continue from exactly|from where you stopped|from where you left off|work appears incomplete|no restart)\b/i;
-
-function lastUserTaskLabel(messages: readonly unknown[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as Record<string, unknown> | null | undefined;
-    if (!m || m.role !== 'user') continue;
-    const content = m.content;
-    let text = '';
-    if (typeof content === 'string') text = content;
-    else if (Array.isArray(content)) {
-      text = content
-        .filter((p: unknown) => typeof p === 'object' && p !== null &&
-          (p as Record<string, unknown>).type === 'text')
-        .map((p: unknown) => String((p as Record<string, unknown>).text || ''))
-        .join(' ');
-    }
-    const clean = text.replace(/\s+/g, ' ').trim();
-    if (clean.length === 0) continue; // tool-result user messages carry no text
-    if (SESSION_META_SIGNALS.test(clean)) return null;
-    if (clean.length < 12) continue; // "yes", "approve", "1-2" are continuations
-    return clean.length > 80 ? `${clean.slice(0, 80).replace(/\s+\S*$/, '')}…` : clean;
-  }
-  return null;
-}
+// task. SESSION_META_SIGNALS and lastUserTaskLabel are imported from
+// lib/lastUserTaskLabel.ts to keep self-repair and quality-guards in sync.
 
 function taskSimilarity(a: string, b: string): number {
   const wordsA = new Set(a.toLowerCase().split(/\s+/));

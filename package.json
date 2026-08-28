@@ -26,5 +26,10 @@
   ],
   "commandcode": {
     "mods": ["./mods/*.ts"]
+  },
+  "scripts": {
+    "contracts": "node scripts/check-contracts.mjs",
+    "sync": "node scripts/sync-user-scope.mjs",
+    "sync:check": "node scripts/sync-user-scope.mjs --check"
   }
 }
