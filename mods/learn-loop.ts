@@ -2,6 +2,7 @@ import type {ModApi} from '@commandcode/harness';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import {spawnSync} from 'node:child_process';
 
 // ── Learn Loop — the learning slot of the truth pipeline ────────────────────
 //
@@ -795,9 +796,24 @@ export default function (cmd: ModApi): void {
       const block = buildRecallBlock(lastUser);
       if (!block) return messages;
 
+      // Surface the most recent automatic-loop run, if any, as a one-line
+      // note in the recall block. This is the Hermes-style "session-boot
+      // reads the skills registry" pattern, applied to the script's
+      // output: the next turn's context window sees "[learn-loop] N
+      // candidates proposed, M graduated, K rejected — see autonomy.jsonl"
+      // so the agent knows the loop ran and what it produced.
+      let loopNote = '';
+      if (lastLoopRun) {
+        if (lastLoopRun.ok) {
+          loopNote = `\n[learn-loop] observed=${lastLoopRun.observed}, proposed=${lastLoopRun.proposed}, graduated=${lastLoopRun.graduated}, rejected=${lastLoopRun.rejected} (ran ${lastLoopRun.ranAt})`;
+        } else {
+          loopNote = `\n[learn-loop] error: ${lastLoopRun.error || 'unknown'} (ran ${lastLoopRun.ranAt})`;
+        }
+      }
+
       // Array content blocks — the harness's wire projection assumes
       // message.content is always an array; string content crashes it.
-      const recallMsg = {role: 'user', content: [{type: 'text', text: block}]};
+      const recallMsg = {role: 'user', content: [{type: 'text', text: block + loopNote}]};
       // Insert directly before the final user message (cache-optimal tail
       // position): only the last array entry falls outside the cached
       // prefix, instead of the last two from a length-2 splice.
@@ -1580,12 +1596,106 @@ export default function (cmd: ModApi): void {
   });
 
   // ── Hooks: onSessionStart / onSessionEnd ────────────────────────────────
+  // The session-end hook runs the kit-side automatic learning loop script
+  // (learning/loop.mjs) when the mandate's `learning_loop.automatic` flag
+  // is true. The script reads the mod's autonomy.jsonl receipts and runs
+  // the propose + graduate stages. The result is stored in `lastLoopRun`
+  // and surfaced via the transformContext hook as a one-line summary, so
+  // the next turn's context window has the loop's output (the Hermes-style
+  // "session-boot reads the skills registry" pattern, applied to the
+  // script's output rather than the registry itself).
+  let lastLoopRun: {
+    observed: number;
+    proposed: number;
+    graduated: number;
+    rejected: number;
+    ranAt: string;
+    ok: boolean;
+    error?: string;
+  } | null = null;
+
+  function readMandateAutomatic(): boolean {
+    // Default: true if the mandate file exists, false otherwise. A consumer
+    // can opt out by setting `learning_loop.automatic: false` in their
+    // `.agents/mandate.json` (or `mandate.json` at the project root).
+    const candidates = [
+      path.join(cmd.cwd, '.agents', 'mandate.json'),
+      path.join(cmd.cwd, 'mandate.json'),
+    ];
+    for (const p of candidates) {
+      if (!fs.existsSync(p)) continue;
+      try {
+        const json = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        if (json.learning_loop && typeof json.learning_loop.automatic === 'boolean') {
+          return json.learning_loop.automatic;
+        }
+        // No learning_loop block at all → default-on for the upgrade.
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  function runAutomaticLoop(): void {
+    if (!readMandateAutomatic()) {
+      lastLoopRun = null;
+      return;
+    }
+    const scriptPath = path.join(cmd.cwd, 'learning', 'loop.mjs');
+    if (!fs.existsSync(scriptPath)) {
+      lastLoopRun = {
+        observed: 0, proposed: 0, graduated: 0, rejected: 0,
+        ranAt: new Date().toISOString(), ok: false,
+        error: 'learning/loop.mjs not found at project root',
+      };
+      return;
+    }
+    try {
+      const result = spawnSync(process.execPath, [scriptPath, '--once', '--json'], {
+        cwd: cmd.cwd, encoding: 'utf-8', timeout: 30_000,
+      });
+      if (result.status !== 0) {
+        lastLoopRun = {
+          observed: 0, proposed: 0, graduated: 0, rejected: 0,
+          ranAt: new Date().toISOString(), ok: false,
+          error: (result.stderr || '').slice(0, 200),
+        };
+        return;
+      }
+      const parsed = JSON.parse(result.stdout);
+      lastLoopRun = {
+        observed: Number(parsed.observed) || 0,
+        proposed: Number(parsed.proposed?.proposed) || 0,
+        graduated: Number(parsed.graduated?.graduated) || 0,
+        rejected: Number(parsed.graduated?.rejected) || 0,
+        ranAt: String(parsed.timestamp || new Date().toISOString()),
+        ok: true,
+      };
+    } catch (e) {
+      lastLoopRun = {
+        observed: 0, proposed: 0, graduated: 0, rejected: 0,
+        ranAt: new Date().toISOString(), ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+
   cmd.hooks({
     onSessionStart: () => {
       resetEpisode();
       cmd.ui.setStatus(buildStatus());
     },
     onSessionEnd: () => {
+      // Run the automatic learning loop on session end. The result lands
+      // in lastLoopRun and is surfaced via transformContext on the next
+      // turn (the mod's existing transformContext hook reads it).
+      try {
+        runAutomaticLoop();
+      } catch {
+        // best-effort; do not block session end on loop failure
+      }
       cmd.ui.setStatus(null);
     },
   });
